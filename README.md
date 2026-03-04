@@ -64,6 +64,15 @@ conda activate gaze_dash
 
 ```
 pip install streamlit plotly pandas numpy opencv-python matplotlib
+conda install -c conda-forge
+
+## FFmpeg (required for video clips)
+
+The dashboard uses FFmpeg to create short preview clips and export MP4s.
+
+Recommended installation (Conda):
+
+```bash
 conda install -c conda-forge ffmpeg
 ```
 
