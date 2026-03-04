@@ -70,7 +70,7 @@ conda install -c conda-forge
 ## FFmpeg (required for video clips)
 
 The dashboard uses FFmpeg to create short preview clips and export MP4s.
-
+```
 Recommended installation (Conda):
 
 ```bash
