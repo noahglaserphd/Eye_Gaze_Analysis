@@ -448,17 +448,24 @@ def export_full_session_assets(session: str) -> str:
     export_plot(make_hist_fix_dur(fix), out_dir / "fix_dur_hist_full")
     export_plot(make_hist_sac_amp(sac), out_dir / "sac_amp_hist_full")
 
+    # --- NEW: AOI export (full session) ---
+    aois = load_aois()
+    if aois:
+        fix_all_aoi = assign_aoi_rects(fix, aois)
+        aoi_summary_table(fix_all_aoi).to_csv(out_dir / "aoi_summary_full.csv", index=False)
+    # --------------------------------------
+
     src_video = find_video_for_session(session)
     if src_video is None:
-        return f"{session}: full charts exported; no source video found in videos/."
+        return f"{session}: full charts exported; AOI CSV exported (if AOIs exist); no source video found in videos/."
     if not ffmpeg_available():
-        return f"{session}: full charts exported; ffmpeg not available for full video export."
+        return f"{session}: full charts exported; AOI CSV exported (if AOIs exist); ffmpeg not available for full video export."
 
     out_mp4 = out_dir / f"{safe_name(session)}_full.mp4"
     if not out_mp4.exists():
         export_full_video_to_mp4(src_video, out_mp4)
 
-    return f"{session}: full charts exported; full video exported."
+    return f"{session}: full charts exported; AOI CSV exported (if AOIs exist); full video exported."
 
 
 # -----------------------------
