@@ -1,9 +1,10 @@
 # app.py
 # Interactive gaze overlay analytics dashboard (Streamlit)
 #
-# AOI drawing uses streamlit-drawable-canvas (rect tool) instead of Plotly events.
+# AOI drawing uses streamlit-drawable-canvas-fix (rect tool).
 # Install:
-#   pip install streamlit streamlit-drawable-canvas plotly pandas numpy opencv-python pillow
+#   pip install streamlit plotly pandas numpy opencv-python matplotlib pillow
+#   pip install streamlit-drawable-canvas-fix
 #   conda install -c conda-forge ffmpeg
 # Optional:
 #   pip install kaleido
@@ -34,6 +35,7 @@ except Exception:
     HAS_FRAME = False
 
 try:
+    # NOTE: you installed streamlit-drawable-canvas-fix but import stays the same
     from streamlit_drawable_canvas import st_canvas  # type: ignore
 
     HAS_CANVAS = True
@@ -147,9 +149,7 @@ def compute_window_metrics(fix: pd.DataFrame, sac: pd.DataFrame, win_df: pd.Data
                 fixation_count=int(len(f)),
                 mean_fix_duration=float(f["duration_s"].mean()) if len(f) else 0.0,
                 total_fix_time=float(f["duration_s"].sum()) if len(f) else 0.0,
-                mean_saccade_amp=float(s["amplitude_norm"].mean())
-                if (len(s) and "amplitude_norm" in s.columns)
-                else 0.0,
+                mean_saccade_amp=float(s["amplitude_norm"].mean()) if (len(s) and "amplitude_norm" in s.columns) else 0.0,
             )
         )
     return pd.DataFrame(rows)
@@ -340,27 +340,6 @@ def get_reference_frame(video_path: Path, t_s: float = 1.0):
     return Image.fromarray(frame_rgb), int(w), int(h)
 
 
-def canvas_objects_to_aois(objs: list[dict], W: int, H: int) -> list[dict]:
-    out: list[dict] = []
-    for o in objs:
-        if not isinstance(o, dict):
-            continue
-        if o.get("type") != "rect":
-            continue
-        left = float(o.get("left", 0.0))
-        top = float(o.get("top", 0.0))
-        width = float(o.get("width", 0.0))
-        height = float(o.get("height", 0.0))
-        x0p = max(0.0, min(float(W), left))
-        y0p = max(0.0, min(float(H), top))
-        x1p = max(0.0, min(float(W), left + width))
-        y1p = max(0.0, min(float(H), top + height))
-        if (x1p - x0p) < 2 or (y1p - y0p) < 2:
-            continue
-        out.append({"name": f"AOI_{len(out)+1}", "x0": x0p / W, "y0": y0p / H, "x1": x1p / W, "y1": y1p / H})
-    return out
-
-
 # -----------------------------
 # Charts
 # -----------------------------
@@ -497,7 +476,6 @@ if not sessions:
     st.error("No sessions found. Expected files like fixations/<name>_fixations.csv")
     st.stop()
 
-
 # -----------------------------
 # Sidebar
 # -----------------------------
@@ -522,7 +500,6 @@ with st.sidebar:
     st.header("Exports")
     export_window_btn = st.button("Export charts + clip (selected window)", use_container_width=True)
     export_all_full_btn = st.button("Export FULL outputs for ALL sessions", use_container_width=True)
-
 
 # -----------------------------
 # Timeline + window selection
@@ -560,7 +537,12 @@ end = float(win_df.loc[idx, "window_end"])
 fix_w, sac_w = subset_window(fix, sac, start, end)
 
 aois = load_aois()
+
+# Window AOI-labeled fixations
 fix_w_aoi = assign_aoi_rects(fix_w, aois)
+
+# FULL SESSION AOI-labeled fixations (this is the new part)
+fix_all_aoi = assign_aoi_rects(fix, aois)
 
 # -----------------------------
 # Charts
@@ -616,7 +598,7 @@ with row2_c2:
     st.plotly_chart(fig_sachist, use_container_width=True)
 
 # -----------------------------
-# AOI summary
+# AOI summaries
 # -----------------------------
 st.markdown("### AOI summary (selected window)")
 if not AOI_FILE.exists():
@@ -626,12 +608,20 @@ elif not aois:
 else:
     st.dataframe(aoi_summary_table(fix_w_aoi), use_container_width=True)
 
+st.markdown("### AOI summary (full session)")
+if not AOI_FILE.exists():
+    st.info("AOIs not enabled yet.")
+elif not aois:
+    st.warning("AOI file exists but no valid AOIs were found (needs name/x0/y0/x1/y1).")
+else:
+    st.dataframe(aoi_summary_table(fix_all_aoi), use_container_width=True)
+
 # -----------------------------
 # AOI editor (canvas)
 # -----------------------------
 with st.expander("AOI editor (draw rectangles and save)", expanded=False):
     if not HAS_CANVAS:
-        st.error("Install: pip install streamlit-drawable-canvas")
+        st.error("Install: pip install streamlit-drawable-canvas-fix")
     elif not HAS_FRAME:
         st.error("Install: pip install opencv-python pillow")
     elif src_video is None:
@@ -645,12 +635,9 @@ with st.expander("AOI editor (draw rectangles and save)", expanded=False):
             st.caption("Draw rectangles; then click Save.")
             canvas_key = f"aoi_canvas_{safe_name(session)}"
 
-            # Size canvas to the actual frame; if it's huge, cap display width for UI
             display_w = min(W, 1100)
             scale = display_w / W
             display_h = int(H * scale)
-
-            # Render scaled background for UI, but keep mapping back to original pixels
             bg_disp = bg.resize((display_w, display_h))
 
             canvas_result = st_canvas(
@@ -669,11 +656,11 @@ with st.expander("AOI editor (draw rectangles and save)", expanded=False):
             if canvas_result and canvas_result.json_data and "objects" in canvas_result.json_data:
                 objs = canvas_result.json_data["objects"] or []
 
-            # Convert scaled-pixel rects -> original-pixel rects -> norm AOIs
             aois_from_canvas: list[dict] = []
             for o in objs:
                 if not isinstance(o, dict) or o.get("type") != "rect":
                     continue
+
                 left = float(o.get("left", 0.0)) / scale
                 top = float(o.get("top", 0.0)) / scale
                 width = float(o.get("width", 0.0)) / scale
@@ -692,8 +679,6 @@ with st.expander("AOI editor (draw rectangles and save)", expanded=False):
 
             if aois_from_canvas:
                 df = pd.DataFrame(aois_from_canvas)
-                df["name"] = [f"AOI_{i+1}" for i in range(len(df))]
-
                 edited = st.data_editor(df, use_container_width=True, num_rows="fixed")
                 aois_final = edited.to_dict(orient="records")
             else:
