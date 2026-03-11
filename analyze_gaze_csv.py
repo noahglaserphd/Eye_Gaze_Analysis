@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 
-INFILE = Path(r"2026-03-03 14-56-00.csv")   # change if needed
+INFILE = list(Path("gaze_samples").glob("*.csv"))[0]   # change if needed
 OUT_FIX = INFILE.with_name(INFILE.stem + "_fixations.csv")
 OUT_SAC = INFILE.with_name(INFILE.stem + "_saccades.csv")
 
@@ -98,4 +98,5 @@ print(f"Input rows: {len(df)}")
 print(f"Fixations: {len(fix)} -> {OUT_FIX.name}")
 print(f"Saccades:  {len(sac)} -> {OUT_SAC.name}")
 print("\nFixations preview:")
+
 print(fix.head(10))
