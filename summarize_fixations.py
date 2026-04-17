@@ -1,21 +1,20 @@
-import pandas as pd
-from pathlib import Path
+"""
+Aggregate fixation statistics from fixations/*_fixations.csv into metrics/fixation_summary.csv.
 
-rows = []
+CLI entrypoint; the Streamlit app uses pipeline_runner.run_summarize_fixations.
+"""
 
-for fix_file in sorted(Path(".").glob("*_fixations.csv")):
-    fix = pd.read_csv(fix_file)
+from __future__ import annotations
 
-    rows.append({
-        "file": fix_file.name,
-        "num_fixations": len(fix),
-        "mean_fixation_duration": fix["duration_s"].mean(),
-        "median_fixation_duration": fix["duration_s"].median(),
-        "longest_fixation": fix["duration_s"].max()
-    })
 
-summary = pd.DataFrame(rows)
+def main() -> None:
+    from pipeline_runner import run_summarize_fixations
 
-summary.to_csv("fixation_summary.csv", index=False)
+    try:
+        run_summarize_fixations(log=print)
+    except ValueError as e:
+        raise SystemExit(str(e)) from None
 
-print("Saved fixation_summary.csv")
+
+if __name__ == "__main__":
+    main()

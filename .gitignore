@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+*.so
+.venv/
+venv/
+env/
+.env
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Generated pipeline outputs (keep repo source-only; remove if you version data)
+gaze_samples/
+fixations/
+saccades/
+metrics/
+time_windows/
+figures/
+cache_clips/
+exports/
+
+# Session media (large binaries; keep recordings under videos/)
+videos/

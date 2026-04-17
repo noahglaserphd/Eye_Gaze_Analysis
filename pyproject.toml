@@ -1,0 +1,13 @@
+[project]
+name = "eye-gaze-analysis"
+version = "0.1.0"
+description = "Video-based gaze analysis from eye-tracking overlays"
+readme = "README.md"
+requires-python = ">=3.9"
+
+# Runtime dependencies are listed in requirements.txt (flat script layout).
+
+[project.optional-dependencies]
+export = [
+    "kaleido>=0.2.1,<2",
+]

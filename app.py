@@ -26,6 +26,18 @@ import plotly.graph_objects as go
 import plotly.io as pio
 import streamlit as st
 
+from pipeline_config import HEATMAP_BINS_STREAMLIT as HEATMAP_BINS, WINDOW_SIZE
+from pipeline_runner import (
+    ensure_project_dirs,
+    run_aggregate_figure,
+    run_analyze_gaze_csvs,
+    run_extract_from_videos,
+    run_full_pipeline,
+    run_session_figures,
+    run_summarize_fixations,
+    run_time_windows,
+)
+
 try:
     import cv2  # type: ignore
     from PIL import Image  # type: ignore
@@ -43,10 +55,8 @@ except Exception:
     HAS_CANVAS = False
 
 # -----------------------------
-# Config
+# Config (defaults in pipeline_config.py)
 # -----------------------------
-WINDOW_SIZE = 30.0
-HEATMAP_BINS = 120
 SUPPORTED_VIDEO_EXTS = (".mp4", ".mkv", ".mov", ".avi")
 
 ROOT = Path(__file__).resolve().parent
@@ -60,11 +70,16 @@ AOI_FILE = AOI_DIR / "aoi_definitions.json"
 
 CLIP_DIR = ROOT / "cache_clips"
 EXPORT_DIR = ROOT / "exports"
+
+ensure_project_dirs()
 CLIP_DIR.mkdir(exist_ok=True)
 EXPORT_DIR.mkdir(exist_ok=True)
 
 st.set_page_config(page_title="Gaze Overlay Analytics", layout="wide")
 st.title("Interactive Gaze Overlay Analytics")
+
+if "pipeline_log" not in st.session_state:
+    st.session_state.pipeline_log = ""
 
 
 # -----------------------------
@@ -72,6 +87,48 @@ st.title("Interactive Gaze Overlay Analytics")
 # -----------------------------
 def safe_name(s: str) -> str:
     return "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in s)
+
+
+def is_safe_session_id(s: str, max_len: int = 240) -> bool:
+    """Reject path-like session stems (e.g. '..', separators) from glob-derived names."""
+    if not s or len(s) > max_len:
+        return False
+    if ".." in s or "/" in s or "\\" in s:
+        return False
+    return True
+
+
+def assert_path_under(path: Path, root: Path) -> Path:
+    """Ensure resolved path stays under root (prevents path traversal via symlinks or joins)."""
+    path = path.resolve()
+    root = root.resolve()
+    if not path.is_relative_to(root):
+        raise ValueError(f"Resolved path is outside allowed directory: {path}")
+    return path
+
+
+def sanitize_aoi_label(name: str, max_len: int = 80) -> str:
+    """Avoid HTML/script injection in Plotly annotations and readable labels."""
+    t = str(name)[:max_len]
+    return "".join(ch for ch in t if ch.isprintable()).replace("<", "").replace(">", "")
+
+
+def run_ffmpeg(cmd: list[str]) -> None:
+    """Run ffmpeg; on failure include stderr in the exception (not swallowed)."""
+    r = subprocess.run(
+        cmd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if r.returncode != 0:
+        err = (r.stderr or "").strip()
+        tail = err[-800:] if len(err) > 800 else err
+        msg = f"ffmpeg exited with code {r.returncode}"
+        if tail:
+            msg += f": {tail}"
+        raise RuntimeError(msg)
 
 
 def mmss(seconds: float) -> str:
@@ -104,23 +161,41 @@ def ffmpeg_available() -> bool:
 @st.cache_data
 def list_sessions() -> list[str]:
     fix_files = sorted(FIX_DIR.glob("*_fixations.csv"))
-    return [p.stem.replace("_fixations", "") for p in fix_files]
+    out = [p.stem.replace("_fixations", "") for p in fix_files]
+    return [s for s in out if is_safe_session_id(s)]
+
+
+def _session_data_paths(session: str) -> tuple[Path, Path]:
+    if not is_safe_session_id(session):
+        raise ValueError("Invalid session id")
+    fix_p = FIX_DIR / f"{session}_fixations.csv"
+    sac_p = SAC_DIR / f"{session}_saccades.csv"
+    assert_path_under(fix_p, FIX_DIR)
+    assert_path_under(sac_p, SAC_DIR)
+    return fix_p, sac_p
 
 
 @st.cache_data
 def load_fix(session: str) -> pd.DataFrame:
-    return pd.read_csv(FIX_DIR / f"{session}_fixations.csv")
+    fix_p, _ = _session_data_paths(session)
+    return pd.read_csv(fix_p)
 
 
 @st.cache_data
 def load_sac(session: str) -> pd.DataFrame:
-    return pd.read_csv(SAC_DIR / f"{session}_saccades.csv")
+    _, sac_p = _session_data_paths(session)
+    return pd.read_csv(sac_p)
 
 
 @st.cache_data
 def load_windows_if_exists(session: str) -> pd.DataFrame | None:
+    if not is_safe_session_id(session):
+        return None
     f = WIN_DIR / f"{session}_windows.csv"
-    return pd.read_csv(f) if f.exists() else None
+    if not f.exists():
+        return None
+    assert_path_under(f, WIN_DIR)
+    return pd.read_csv(f)
 
 
 def compute_windows_from_fix(fix: pd.DataFrame) -> pd.DataFrame:
@@ -165,19 +240,21 @@ def subset_window(fix: pd.DataFrame, sac: pd.DataFrame, start: float, end: float
 # Video discovery / ffmpeg
 # -----------------------------
 def find_video_for_session(session: str) -> Path | None:
-    if not VIDEO_DIR.exists():
+    if not is_safe_session_id(session) or not VIDEO_DIR.exists():
         return None
     for ext in SUPPORTED_VIDEO_EXTS:
         p = VIDEO_DIR / f"{session}{ext}"
         if p.exists():
-            return p
+            return assert_path_under(p, VIDEO_DIR)
     for p in VIDEO_DIR.iterdir():
         if p.is_file() and p.suffix.lower() in SUPPORTED_VIDEO_EXTS and p.stem.startswith(session):
-            return p
+            return assert_path_under(p, VIDEO_DIR)
     return None
 
 
 def make_clip_ffmpeg(src: Path, start_s: float, end_s: float, out_mp4: Path) -> Path:
+    assert_path_under(src, VIDEO_DIR)
+    assert_path_under(out_mp4, CLIP_DIR)
     dur = max(0.1, end_s - start_s)
     cmd = [
         "ffmpeg",
@@ -199,11 +276,13 @@ def make_clip_ffmpeg(src: Path, start_s: float, end_s: float, out_mp4: Path) -> 
         "veryfast",
         str(out_mp4),
     ]
-    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+    run_ffmpeg(cmd)
     return out_mp4
 
 
 def export_full_video_to_mp4(src: Path, out_mp4: Path) -> Path:
+    assert_path_under(src, VIDEO_DIR)
+    assert_path_under(out_mp4, EXPORT_DIR)
     cmd = [
         "ffmpeg",
         "-y",
@@ -218,7 +297,7 @@ def export_full_video_to_mp4(src: Path, out_mp4: Path) -> Path:
         "-an",
         str(out_mp4),
     ]
-    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+    run_ffmpeg(cmd)
     return out_mp4
 
 
@@ -241,8 +320,16 @@ def load_aois() -> list[dict]:
         if not all(k in a for k in ("name", "x0", "y0", "x1", "y1")):
             continue
         try:
+            x0, y0 = float(a["x0"]), float(a["y0"])
+            x1, y1 = float(a["x1"]), float(a["y1"])
             cleaned.append(
-                {"name": str(a["name"]), "x0": float(a["x0"]), "y0": float(a["y0"]), "x1": float(a["x1"]), "y1": float(a["y1"])}
+                {
+                    "name": sanitize_aoi_label(str(a["name"])),
+                    "x0": float(np.clip(min(x0, x1), 0.0, 1.0)),
+                    "y0": float(np.clip(min(y0, y1), 0.0, 1.0)),
+                    "x1": float(np.clip(max(x0, x1), 0.0, 1.0)),
+                    "y1": float(np.clip(max(y0, y1), 0.0, 1.0)),
+                }
             )
         except Exception:
             continue
@@ -301,7 +388,7 @@ def add_aoi_shapes_to_scanpath(fig: go.Figure, aois: list[dict]) -> go.Figure:
         fig.add_annotation(
             x=(a["x0"] + a["x1"]) / 2.0,
             y=a["y0"],
-            text=a["name"],
+            text=sanitize_aoi_label(str(a.get("name", ""))),
             showarrow=False,
             yanchor="bottom",
             font=dict(size=12),
@@ -311,9 +398,29 @@ def add_aoi_shapes_to_scanpath(fig: go.Figure, aois: list[dict]) -> go.Figure:
 
 def save_aois(aois: list[dict]) -> None:
     AOI_DIR.mkdir(exist_ok=True)
-    payload = {"coordinate_space": "norm", "aois": aois}
+    norm: list[dict] = []
+    for a in aois:
+        if not isinstance(a, dict):
+            continue
+        if not all(k in a for k in ("name", "x0", "y0", "x1", "y1")):
+            continue
+        try:
+            x0, y0 = float(a["x0"]), float(a["y0"])
+            x1, y1 = float(a["x1"]), float(a["y1"])
+            norm.append(
+                {
+                    "name": sanitize_aoi_label(str(a.get("name", "AOI"))),
+                    "x0": float(np.clip(min(x0, x1), 0.0, 1.0)),
+                    "y0": float(np.clip(min(y0, y1), 0.0, 1.0)),
+                    "x1": float(np.clip(max(x0, x1), 0.0, 1.0)),
+                    "y1": float(np.clip(max(y0, y1), 0.0, 1.0)),
+                }
+            )
+        except (TypeError, ValueError):
+            continue
+    payload = {"coordinate_space": "norm", "aois": norm}
     AOI_FILE.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    st.cache_data.clear()
+    load_aois.clear()
 
 
 # -----------------------------
@@ -323,6 +430,7 @@ def save_aois(aois: list[dict]) -> None:
 def get_reference_frame(video_path: Path, t_s: float = 1.0):
     if not HAS_FRAME:
         return None, None, None
+    assert_path_under(Path(video_path), VIDEO_DIR)
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         return None, None, None
@@ -424,6 +532,7 @@ def export_plot(fig, out_base: Path):
 def export_window_assets(session: str, start: float, end: float, figs: dict, preview_clip: Path | None) -> Path:
     out_dir = EXPORT_DIR / safe_name(session) / window_label_pathsafe(start, end)
     out_dir.mkdir(parents=True, exist_ok=True)
+    assert_path_under(out_dir, EXPORT_DIR)
 
     export_plot(figs["heatmap"], out_dir / "heatmap")
     export_plot(figs["scanpath"], out_dir / "scanpath")
@@ -431,17 +540,21 @@ def export_window_assets(session: str, start: float, end: float, figs: dict, pre
     export_plot(figs["sachist"], out_dir / "sac_amp_hist")
 
     if preview_clip and preview_clip.exists():
+        assert_path_under(preview_clip, CLIP_DIR)
         shutil.copyfile(preview_clip, out_dir / "clip.mp4")
 
     return out_dir
 
 
 def export_full_session_assets(session: str) -> str:
+    if not is_safe_session_id(session):
+        raise ValueError("Invalid session id")
     fix = load_fix(session)
     sac = load_sac(session)
 
     out_dir = EXPORT_DIR / safe_name(session) / "FULL"
     out_dir.mkdir(parents=True, exist_ok=True)
+    assert_path_under(out_dir, EXPORT_DIR)
 
     export_plot(make_heatmap(fix), out_dir / "heatmap_full")
     export_plot(make_scanpath(fix), out_dir / "scanpath_full")
@@ -469,44 +582,172 @@ def export_full_session_assets(session: str) -> str:
 
 
 # -----------------------------
-# Guardrails
+# Sessions + sidebar (pipeline + explore)
 # -----------------------------
-if not FIX_DIR.exists():
-    st.error("Missing folder: fixations/")
-    st.stop()
-if not SAC_DIR.exists():
-    st.error("Missing folder: saccades/")
-    st.stop()
-
 sessions = list_sessions()
-if not sessions:
-    st.error("No sessions found. Expected files like fixations/<name>_fixations.csv")
-    st.stop()
+has_sessions = len(sessions) > 0
 
-# -----------------------------
-# Sidebar
-# -----------------------------
 with st.sidebar:
-    st.header("Selection")
-    session = st.selectbox("Session", sessions)
+    with st.expander("Data pipeline (run here — no terminal)", expanded=not has_sessions):
+        st.caption(
+            "Place videos in `videos/` **or** gaze CSVs in `gaze_samples/`, then run. "
+            "Requires OpenCV for video extraction; FFmpeg for clips in Explore."
+        )
+        if st.button("Run full pipeline", type="primary", use_container_width=True):
+            log_lines: list[str] = []
 
-    fix = load_fix(session)
-    sac = load_sac(session)
+            def _append_log(msg: str) -> None:
+                log_lines.append(msg)
 
-    win_df = load_windows_if_exists(session)
-    if win_df is None:
-        win_df = compute_windows_from_fix(fix)
-    if len(win_df) == 0:
-        st.warning("No windows available (empty fixation file).")
-        st.stop()
+            try:
+                with st.spinner("Running full pipeline…"):
+                    run_full_pipeline(log=_append_log)
+                st.session_state.pipeline_log = "\n".join(log_lines)
+                st.cache_data.clear()
+                st.success("Pipeline finished.")
+                st.rerun()
+            except Exception as e:
+                st.session_state.pipeline_log = "\n".join(log_lines) + f"\nError: {e}"
+                st.error(str(e))
 
-    win_df = compute_window_metrics(fix, sac, win_df)
-    win_df = win_df.sort_values("window_start").reset_index(drop=True)
+        st.markdown("**Individual steps**")
+        if st.button("Videos → events", use_container_width=True, help="Decode gaze from videos/"):
+            lines: list[str] = []
+
+            def lgv(m: str) -> None:
+                lines.append(m)
+
+            try:
+                with st.spinner("Extracting from videos…"):
+                    run_extract_from_videos(log=lgv)
+                st.session_state.pipeline_log = "\n".join(lines)
+                st.cache_data.clear()
+                st.success("Video extraction finished.")
+                st.rerun()
+            except Exception as e:
+                st.session_state.pipeline_log = "\n".join(lines) + f"\nError: {e}"
+                st.error(str(e))
+
+        if st.button("Gaze CSVs → events", use_container_width=True, help="I-DT on gaze_samples/*.csv"):
+            lines: list[str] = []
+
+            def lg(m: str) -> None:
+                lines.append(m)
+
+            try:
+                with st.spinner("Processing gaze CSVs…"):
+                    run_analyze_gaze_csvs(log=lg)
+                st.session_state.pipeline_log = "\n".join(lines)
+                st.cache_data.clear()
+                st.success("Done.")
+                st.rerun()
+            except Exception as e:
+                st.session_state.pipeline_log = "\n".join(lines) + f"\nError: {e}"
+                st.error(str(e))
+
+        if st.button("Summarize fixations", use_container_width=True):
+            lines = []
+
+            def lg2(m: str) -> None:
+                lines.append(m)
+
+            try:
+                with st.spinner("Summarizing…"):
+                    run_summarize_fixations(log=lg2)
+                st.session_state.pipeline_log = "\n".join(lines)
+                st.cache_data.clear()
+                st.rerun()
+            except Exception as e:
+                st.error(str(e))
+
+        if st.button("Time windows", use_container_width=True):
+            lines = []
+
+            def lg3(m: str) -> None:
+                lines.append(m)
+
+            try:
+                with st.spinner("Computing windows…"):
+                    run_time_windows(log=lg3)
+                st.session_state.pipeline_log = "\n".join(lines)
+                st.cache_data.clear()
+                st.rerun()
+            except Exception as e:
+                st.error(str(e))
+
+        if st.button("Session PNG figures", use_container_width=True):
+            lines = []
+
+            def lg4(m: str) -> None:
+                lines.append(m)
+
+            try:
+                with st.spinner("Building figures…"):
+                    run_session_figures(log=lg4)
+                st.session_state.pipeline_log = "\n".join(lines)
+                st.cache_data.clear()
+                st.rerun()
+            except Exception as e:
+                st.error(str(e))
+
+        if st.button("Aggregate figure", use_container_width=True):
+            lines = []
+
+            def lg5(m: str) -> None:
+                lines.append(m)
+
+            try:
+                with st.spinner("Building aggregate…"):
+                    run_aggregate_figure(log=lg5)
+                st.session_state.pipeline_log = "\n".join(lines)
+                st.cache_data.clear()
+                st.rerun()
+            except Exception as e:
+                st.error(str(e))
+
+        st.text_area(
+            "Last pipeline log",
+            value=st.session_state.pipeline_log,
+            height=160,
+            disabled=True,
+            label_visibility="collapsed",
+        )
 
     st.divider()
-    st.header("Exports")
-    export_window_btn = st.button("Export charts + clip (selected window)", use_container_width=True)
-    export_all_full_btn = st.button("Export FULL outputs for ALL sessions", use_container_width=True)
+    st.header("Explore")
+    if has_sessions:
+        session = st.selectbox("Session", sessions, key="explore_session")
+
+        fix = load_fix(session)
+        sac = load_sac(session)
+
+        win_df = load_windows_if_exists(session)
+        if win_df is None:
+            win_df = compute_windows_from_fix(fix)
+        if len(win_df) == 0:
+            st.warning("No windows available (empty fixation file).")
+            st.stop()
+
+        win_df = compute_window_metrics(fix, sac, win_df)
+        win_df = win_df.sort_values("window_start").reset_index(drop=True)
+
+        st.divider()
+        st.header("Exports")
+        export_window_btn = st.button("Export charts + clip (selected window)", use_container_width=True)
+        export_all_full_btn = st.button("Export FULL outputs for ALL sessions", use_container_width=True)
+    else:
+        session = None
+        fix = sac = win_df = None
+        export_window_btn = False
+        export_all_full_btn = False
+        st.caption("Run the pipeline above to create sessions.")
+
+if not has_sessions:
+    st.info(
+        "No fixation data yet. Add video files under `videos/` (or gaze CSVs under `gaze_samples/`), "
+        "then open **Data pipeline** in the sidebar and click **Run full pipeline**."
+    )
+    st.stop()
 
 # -----------------------------
 # Timeline + window selection
@@ -537,7 +778,13 @@ timeline_fig.update_yaxes(gridcolor="rgba(255,255,255,0.12)")
 st.plotly_chart(timeline_fig, use_container_width=True)
 
 labels = [window_label_human(float(r.window_start), float(r.window_end)) for r in win_df.itertuples(index=False)]
-idx = st.selectbox("Select 30-second window", options=list(range(len(labels))), index=0, format_func=lambda i: labels[i], key="window_dropdown_main")
+idx = st.selectbox(
+    f"Select {WINDOW_SIZE:g}-second window",
+    options=list(range(len(labels))),
+    index=0,
+    format_func=lambda i: labels[i],
+    key="window_dropdown_main",
+)
 
 start = float(win_df.loc[idx, "window_start"])
 end = float(win_df.loc[idx, "window_end"])
@@ -577,16 +824,20 @@ if src_video is not None and ffmpeg_available():
             preview_clip = None
 
 if export_window_btn:
-    out_dir = export_window_assets(session, start, end, figs, preview_clip)
-    status.success(f"Exported to: {out_dir}")
+    try:
+        out_dir = export_window_assets(session, start, end, figs, preview_clip)
+        status.success(f"Exported to: {out_dir}")
+    except Exception as e:
+        status.error(f"Export failed: {e}")
 
 if export_all_full_btn:
     msgs = []
-    for sess in sessions:
-        try:
-            msgs.append(export_full_session_assets(sess))
-        except Exception as e:
-            msgs.append(f"{sess}: export failed ({e})")
+    with st.spinner("Exporting full outputs for all sessions…"):
+        for sess in sessions:
+            try:
+                msgs.append(export_full_session_assets(sess))
+            except Exception as e:
+                msgs.append(f"{sess}: export failed ({e})")
     status.success("Batch export complete:\n" + "\n".join(msgs))
 
 # -----------------------------
@@ -714,8 +965,8 @@ else:
     if not ffmpeg_available():
         st.error("FFmpeg not found, so clips cannot be generated.")
     elif preview_clip and preview_clip.exists():
-        with open(preview_clip, "rb") as f:
-            st.video(f.read())
+        assert_path_under(preview_clip, CLIP_DIR)
+        st.video(str(preview_clip))
     else:
         st.caption("No preview clip available for this window.")
 

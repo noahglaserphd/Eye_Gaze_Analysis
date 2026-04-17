@@ -16,17 +16,18 @@ This pipeline converts eye-tracking overlays from recorded videos into analyzabl
 
 # Project Workflow
 
-The system runs in two stages.
+## Recommended — unified dashboard
 
-## Stage 1 — Offline Processing
+1. Install dependencies and FFmpeg (see **Installation**).
+2. Put recordings in `videos/` **or** pre-built gaze CSVs in `gaze_samples/`.
+3. Start the app: `streamlit run app.py`
+4. In the sidebar, open **Data pipeline** and click **Run full pipeline**. This runs extraction (when videos are present), fixation summaries, time-window metrics, and matplotlib figures on disk — the same steps the CLI scripts perform, without a separate terminal.
 
-Scripts extract gaze coordinates from video files and compute gaze metrics.
+You can also run individual pipeline steps from the sidebar (e.g. only **Videos → events** or only **Time windows**).
 
-## Stage 2 — Interactive Dashboard
+## Alternative — command-line scripts
 
-A Streamlit dashboard allows exploration of sessions, time windows, gaze visualizations, AOI analysis, and synchronized video playback.
-
-The dashboard **does not process raw video**. It only visualizes results produced by the processing scripts.
+The same logic lives in `pipeline_runner.py` and is exposed by the existing scripts (`extract_dot.py`, `analyze_gaze_csv.py`, etc.) for batch or headless use.
 
 ---
 
@@ -48,7 +49,8 @@ The dashboard **does not process raw video**. It only visualizes results produce
     make_figures.py              generates per-session visualization figures
     make_aggregate_figure.py     generates multi-session summary figures
     
-    app.py                       interactive dashboard
+    app.py                       interactive dashboard (pipeline + exploration)
+    pipeline_runner.py           shared pipeline implementation (dashboard + CLI)
 
 ---
 
@@ -61,18 +63,19 @@ Create a Conda environment:
     conda create -n gaze_dash-try python=3.10
     conda activate gaze_dash-try
 
-Install required libraries:
+Install required libraries (see `requirements.txt` for version ranges):
 
-    pip install streamlit plotly pandas numpy opencv-python matplotlib pillow
-    pip install streamlit-drawable-canvas-fix
+    pip install -r requirements.txt
 
 Install **FFmpeg** (required for video previews and exports):
 
     conda install -c conda-forge ffmpeg
 
-Optional (for exporting PNG figures):
+Optional: export Plotly charts as PNG from the dashboard:
 
-    pip install kaleido
+    pip install "kaleido>=0.2.1,<2"
+
+Shared defaults for window length and heatmap resolution live in `pipeline_config.py`. The repository includes a `.gitignore` that excludes typical generated folders (`gaze_samples/`, `fixations/`, `videos/`, etc.); adjust it if you need to version data in git.
 
 ---
 
@@ -176,7 +179,7 @@ Start the dashboard:
 
     streamlit run app.py
 
-The dashboard will open automatically in a browser.
+The dashboard will open automatically in a browser. Use **Data pipeline** in the sidebar to run processing without using the terminal steps above, or run those steps first if you prefer scripts.
 
 ---
 

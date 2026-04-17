@@ -6,13 +6,26 @@
 # Writes:
 #   figures/<stem>_summary.png
 #
-# Install (in video_cv):
+# Install:
 #   pip install matplotlib pandas numpy
 
 from pathlib import Path
+
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
+
+from pipeline_config import (
+    GAUSSIAN_HEATMAP_SESSION_RADIUS,
+    GAUSSIAN_HEATMAP_SESSION_SIGMA,
+    HEATMAP_BINS_SESSION_PNG,
+)
+from viz_utils import (
+    duration_weighted_fixation_heatmap,
+    safe_max,
+    safe_mean,
+    safe_median,
+)
 
 ROOT = Path(__file__).resolve().parent
 GAZE_DIR = ROOT / "gaze_samples"
@@ -21,64 +34,6 @@ SAC_DIR = ROOT / "saccades"
 FIG_DIR = ROOT / "figures"
 FIG_DIR.mkdir(exist_ok=True)
 
-HEATMAP_BINS = 140
-
-def gaussian_kernel(radius: int = 6, sigma: float = 2.2) -> np.ndarray:
-    ax = np.arange(-radius, radius + 1)
-    xx, yy = np.meshgrid(ax, ax)
-    k = np.exp(-(xx**2 + yy**2) / (2 * sigma**2))
-    k /= k.sum()
-    return k
-
-def convolve2d_same(img: np.ndarray, kernel: np.ndarray) -> np.ndarray:
-    kh, kw = kernel.shape
-    pad_h, pad_w = kh // 2, kw // 2
-    padded = np.pad(img, ((pad_h, pad_h), (pad_w, pad_w)), mode="edge")
-    out = np.zeros_like(img, dtype=float)
-
-    # dependency-free convolution (fast enough for ~140x140)
-    for i in range(out.shape[0]):
-        for j in range(out.shape[1]):
-            window = padded[i:i+kh, j:j+kw]
-            out[i, j] = np.sum(window * kernel)
-    return out
-
-def fixation_heatmap(fix: pd.DataFrame, bins: int = HEATMAP_BINS) -> np.ndarray:
-    if len(fix) == 0:
-        return np.zeros((bins, bins), dtype=float)
-
-    x = fix["x_norm"].to_numpy(dtype=float)
-    y = fix["y_norm"].to_numpy(dtype=float)
-    w = fix["duration_s"].to_numpy(dtype=float)
-
-    valid = np.isfinite(x) & np.isfinite(y) & np.isfinite(w)
-    x, y, w = x[valid], y[valid], w[valid]
-
-    if len(x) == 0:
-        return np.zeros((bins, bins), dtype=float)
-
-    H, _, _ = np.histogram2d(
-        x, y,
-        bins=bins,
-        range=[[0, 1], [0, 1]],
-        weights=w
-    )
-
-    # histogram2d returns (xbins, ybins); transpose for image coords
-    H = H.T
-
-    k = gaussian_kernel()
-    Hs = convolve2d_same(H, k)
-    return Hs
-
-def safe_mean(series: pd.Series) -> float:
-    return float(series.mean()) if len(series) else float("nan")
-
-def safe_median(series: pd.Series) -> float:
-    return float(series.median()) if len(series) else float("nan")
-
-def safe_max(series: pd.Series) -> float:
-    return float(series.max()) if len(series) else float("nan")
 
 def plot_summary_for_stem(stem: str) -> None:
     gaze_file = GAZE_DIR / f"{stem}.csv"
@@ -102,7 +57,12 @@ def plot_summary_for_stem(stem: str) -> None:
     mean_amp = safe_mean(sac["amplitude_norm"]) if n_sac else float("nan")
     mean_sac_dur = safe_mean(sac["duration_s"]) if n_sac else float("nan")
 
-    heat = fixation_heatmap(fix)
+    heat = duration_weighted_fixation_heatmap(
+        fix,
+        bins=HEATMAP_BINS_SESSION_PNG,
+        gaussian_radius=GAUSSIAN_HEATMAP_SESSION_RADIUS,
+        gaussian_sigma=GAUSSIAN_HEATMAP_SESSION_SIGMA,
+    )
 
     # ---- Build figure using subplots (clean layout) ----
     fig, axs = plt.subplots(2, 2, figsize=(13, 9))
@@ -156,6 +116,7 @@ def plot_summary_for_stem(stem: str) -> None:
     plt.close(fig)
     print(f"Wrote {out.relative_to(ROOT)}")
 
+
 def main() -> None:
     if not GAZE_DIR.exists():
         raise SystemExit(f"Missing folder: {GAZE_DIR}")
@@ -166,6 +127,7 @@ def main() -> None:
 
     for stem in stems:
         plot_summary_for_stem(stem)
+
 
 if __name__ == "__main__":
     main()
