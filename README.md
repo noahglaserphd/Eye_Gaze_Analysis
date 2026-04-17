@@ -77,11 +77,19 @@ Optional: export Plotly charts as PNG from the dashboard:
 
 Shared defaults for window length and heatmap resolution live in `pipeline_config.py`. The repository includes a `.gitignore` that excludes typical generated folders (`gaze_samples/`, `fixations/`, `videos/`, etc.); adjust it if you need to version data in git.
 
+Other shared modules: `gaze_detection.py` (I-DT fixations and saccades), `viz_utils.py` (offline heatmaps for PNG figures).
+
+---
+
+# Step-by-step reference (CLI)
+
+The steps below match what **Data pipeline** in the app runs on disk. If you already used **Run full pipeline** in `app.py`, you can go straight to exploration (see **Step 7**) or use these commands for scripts and reproducibility.
+
 ---
 
 # Step 1 — Prepare Videos
 
-Place recorded gameplay or task recordings inside the `videos/` folder.
+Place recorded gameplay or task recordings inside the `videos/` folder (optional if you only use pre-built gaze CSVs in `gaze_samples/`).
 
 Example:
 
@@ -94,40 +102,44 @@ Each filename becomes the **session identifier** used throughout the analysis.
 
 ---
 
-# Step 2 — Extract Gaze Coordinates
+# Step 2 — Extract gaze from video (and derive events)
 
-Run the gaze extraction script:
+Run:
 
     python extract_dot.py
 
-This script scans videos and detects the gaze marker in each frame.
+Or in the app: **Data pipeline** → **Videos → events** or **Run full pipeline**.
 
-Outputs:
+This scans each video for the gaze marker, writes timestamped gaze coordinates, then runs fixation and saccade detection and updates `metrics/fixation_summary.csv`.
+
+Outputs (per session stem):
 
     gaze_samples/<session>.csv
-
-These files contain timestamped gaze coordinates for each frame.
+    fixations/<session>_fixations.csv
+    saccades/<session>_saccades.csv
 
 ---
 
-# Step 3 — Process Gaze Data
+# Step 3 — Process gaze CSVs only (no video decode)
 
-Convert gaze samples into structured eye-movement events:
+Use this when you already have `gaze_samples/<session>.csv` and want to recompute fixations/saccades without re-running video extraction:
 
     python analyze_gaze_csv.py
+
+Or in the app: **Gaze CSVs → events** (or **Run full pipeline** when there are no videos in `videos/` but gaze CSVs exist).
 
 Outputs:
 
     fixations/<session>_fixations.csv
     saccades/<session>_saccades.csv
 
-These datasets contain fixation events and saccade events derived from gaze coordinates.
-
 ---
 
-# Step 4 — Generate Fixation Statistics
+# Step 4 — Generate fixation statistics
 
     python summarize_fixations.py
+
+Or in the app: **Summarize fixations** (included in **Run full pipeline**).
 
 Produces summary statistics describing fixation behavior across sessions.
 
@@ -137,9 +149,11 @@ Output:
 
 ---
 
-# Step 5 — Generate Session Visualizations
+# Step 5 — Generate session visualizations (PNG)
 
     python make_figures.py
+
+Or in the app: **Session PNG figures** (included in **Run full pipeline**).
 
 Creates figures including:
 
@@ -148,13 +162,21 @@ Creates figures including:
 - fixation duration distributions  
 - saccade amplitude distributions  
 
+Dataset-level summary (all sessions in one figure):
+
+    python make_aggregate_figure.py
+
+Or in the app: **Aggregate figure** (included in **Run full pipeline**). Output: `figures/ALL_sessions_summary.png`.
+
 ---
 
-# Step 6 — Generate Time Window Metrics
+# Step 6 — Generate time window metrics
 
     python window_analysis.py
 
-This divides each session into **30-second windows** and calculates gaze metrics for each window.
+Or in the app: **Time windows** (included in **Run full pipeline**).
+
+This divides each session into time windows (default **30 seconds**, set in `pipeline_config.py` as `WINDOW_SIZE`) and calculates gaze metrics for each window.
 
 Example segmentation:
 
@@ -173,24 +195,25 @@ These metrics allow researchers to analyze **temporal changes in attention**.
 
 ---
 
-# Step 7 — Launch the Interactive Dashboard
+# Step 7 — Launch the interactive dashboard
 
 Start the dashboard:
 
     streamlit run app.py
 
-The dashboard will open automatically in a browser. Use **Data pipeline** in the sidebar to run processing without using the terminal steps above, or run those steps first if you prefer scripts.
+The dashboard opens in your browser. Use **Data pipeline** in the sidebar to run the same processing as Steps 2–6 on disk, then use **Explore** to inspect sessions. You can also run the CLI steps first and use the app for exploration only.
 
 ---
 
 # Dashboard Capabilities
 
-The dashboard allows researchers to interactively explore gaze behavior.
+The dashboard allows researchers to interactively explore gaze behavior and to **run the full processing pipeline** from the sidebar.
 
 Features include:
 
+- **Data pipeline** controls (full run or individual steps: video extraction, gaze CSV processing, summaries, time windows, PNG figures, aggregate figure)  
 - selecting recorded sessions  
-- inspecting **30-second time windows**  
+- inspecting time windows (default length in `pipeline_config.py`)  
 - viewing fixation heatmaps  
 - visualizing scanpaths  
 - examining fixation duration distributions  
@@ -269,7 +292,7 @@ https://github.com/noahglaserphd/Eye_Gaze_Analysis
 
 # Institutional Attribution
 
-Developed by **Noah Glaser**  
+Developed by **Noah Glaser** and **Sean Gallagher**
 School of Information Science & Learning Technologies  
 University of Missouri  
 
