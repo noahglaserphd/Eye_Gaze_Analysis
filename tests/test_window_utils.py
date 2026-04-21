@@ -3,7 +3,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from window_utils import compute_window_metrics, compute_windows_from_fix, subset_window
+from core.window_utils import compute_window_metrics, compute_windows_from_fix, subset_window
 
 
 def test_compute_windows_from_fix_empty() -> None:

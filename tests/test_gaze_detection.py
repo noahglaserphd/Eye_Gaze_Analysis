@@ -3,7 +3,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from gaze_detection import detect_fixations_idt, saccades_from_fixations
+from core.gaze_detection import detect_fixations_idt, saccades_from_fixations
 
 
 def test_detect_fixations_idt_requires_columns() -> None:

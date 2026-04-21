@@ -16,7 +16,7 @@ from typing import Optional
 
 import pandas as pd
 
-from extract_dot import (
+from core.extract_dot import (
     FIX_DIR,
     GAZE_DIR,
     METRICS_DIR,
@@ -27,8 +27,8 @@ from extract_dot import (
     extract_gaze_from_video,
     summarize_fixations,
 )
-from extract_dot import ensure_pipeline_dirs as ensure_extract_dirs
-from gaze_detection import (
+from core.extract_dot import ensure_pipeline_dirs as ensure_extract_dirs
+from core.gaze_detection import (
     DISPERSION_THRESH_NORM,
     MIN_FIX_DURATION_S,
     detect_fixations_idt,
@@ -212,7 +212,7 @@ def run_summarize_fixations(log: LogFn = None) -> list[str]:
 
 def run_time_windows(log: LogFn = None) -> list[str]:
     """fixations/ + saccades/ → time_windows/* + timeline PNGs."""
-    import window_analysis
+    from core import window_analysis
 
     lines: list[str] = []
     if not FIX_DIR.exists():
@@ -229,7 +229,7 @@ def run_time_windows(log: LogFn = None) -> list[str]:
 
 def run_session_figures(log: LogFn = None) -> list[str]:
     """Per-session PNG summaries in figures/."""
-    import make_figures
+    from core import make_figures
 
     lines: list[str] = []
     keep_stems = _session_stems_from_glob(GAZE_DIR, "*.csv", "")
@@ -243,7 +243,7 @@ def run_session_figures(log: LogFn = None) -> list[str]:
 
 def run_aggregate_figure(log: LogFn = None) -> list[str]:
     """figures/ALL_sessions_summary.png"""
-    import make_aggregate_figure
+    from core import make_aggregate_figure
 
     lines: list[str] = []
     make_aggregate_figure.main(log=lambda m: _emit(m, log, lines))

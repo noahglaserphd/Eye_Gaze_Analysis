@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from dashboard_aoi import assign_aoi_rects, normalize_aois
+from core.dashboard_aoi import assign_aoi_rects, normalize_aois
 
 
 def test_normalize_aois_clamps_and_orders() -> None:
