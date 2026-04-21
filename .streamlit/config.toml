@@ -1,0 +1,5 @@
+# Dashboard uploads (st.file_uploader): Streamlit defaults to 200 MB total per request.
+# Values are in megabytes. Raise both so large videos do not fail mid-upload over WebSocket.
+[server]
+maxUploadSize = 102400
+maxMessageSize = 102400

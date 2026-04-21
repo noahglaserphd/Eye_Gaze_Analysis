@@ -29,7 +29,7 @@ from core.pipeline_config import (
 )
 from core.viz_utils import duration_weighted_fixation_heatmap
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 FIX_DIR = ROOT / "fixations"
 SAC_DIR = ROOT / "saccades"
 FIG_DIR = ROOT / "figures"

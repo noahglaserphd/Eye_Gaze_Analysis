@@ -6,8 +6,9 @@
 #   pip install streamlit plotly pandas numpy opencv-python matplotlib pillow
 #   pip install streamlit-drawable-canvas-fix
 #   conda install -c conda-forge ffmpeg
-# Optional:
-#   pip install kaleido
+# PNG: Kaleido 1.x + Plotly 6+ can fail on some Windows setups; HTML export always works.
+# FFmpeg: if `ffmpeg` is not on PATH (e.g. Cursor/Streamlit started outside conda), set
+# FFMPEG_BINARY to the full path of ffmpeg.exe, or use conda-forge ffmpeg in the env.
 #
 # Run:
 #   streamlit run app.py
@@ -15,9 +16,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+import functools
 import json
+import os
 import shutil
 import subprocess
+import sys
 
 import numpy as np
 import pandas as pd
@@ -61,8 +65,10 @@ except Exception:
 # -----------------------------
 SUPPORTED_VIDEO_EXTS = (".mp4", ".mkv", ".mov", ".avi")
 
-ROOT = Path(__file__).resolve().parent
+# Repo root (parent of this `core/` package)
+ROOT = Path(__file__).resolve().parent.parent
 VIDEO_DIR = ROOT / "videos"
+GAZE_DIR = ROOT / "gaze_samples"
 FIX_DIR = ROOT / "fixations"
 SAC_DIR = ROOT / "saccades"
 WIN_DIR = ROOT / "time_windows"
@@ -109,14 +115,165 @@ def assert_path_under(path: Path, root: Path) -> Path:
     return path
 
 
+def _sanitize_upload_basename(name: str) -> str:
+    base = Path(name).name
+    if not base or base in (".", ".."):
+        base = "upload"
+    stem = safe_name(Path(base).stem)
+    suf = Path(base).suffix.lower()
+    return f"{stem}{suf}" if suf else stem
+
+
+def _as_upload_file_list(uploaded) -> list:
+    """Normalize Streamlit file_uploader return value (None, one file, list, or tuple)."""
+    if uploaded is None:
+        return []
+    if isinstance(uploaded, (list, tuple)):
+        return list(uploaded)
+    return [uploaded]
+
+
+def _unique_basename_in_dir(directory: Path, basename: str) -> str:
+    """Pick a basename under directory that does not yet exist (append _2, _3, … before suffix)."""
+    p = Path(basename)
+    stem, suf = p.stem, p.suffix
+    candidate = f"{stem}{suf}"
+    n = 1
+    while (directory / candidate).exists():
+        n += 1
+        candidate = f"{stem}_{n}{suf}"
+    return candidate
+
+
+def save_uploads_to_videos(uploaded) -> list[str]:
+    """Write uploaded video files into videos/; returns basenames saved."""
+    files = _as_upload_file_list(uploaded)
+    if not files:
+        return []
+    VIDEO_DIR.mkdir(parents=True, exist_ok=True)
+    saved: list[str] = []
+    for uf in files:
+        base = _sanitize_upload_basename(uf.name)
+        if not any(base.lower().endswith(ext) for ext in SUPPORTED_VIDEO_EXTS):
+            continue
+        out_name = _unique_basename_in_dir(VIDEO_DIR, base)
+        dest = (VIDEO_DIR / out_name).resolve()
+        assert_path_under(dest, VIDEO_DIR.resolve())
+        data = uf.getvalue() if hasattr(uf, "getvalue") else uf.read()
+        dest.write_bytes(data)
+        saved.append(out_name)
+    return saved
+
+
+def save_uploads_to_gaze_samples(uploaded) -> list[str]:
+    """Write uploaded gaze CSVs into gaze_samples/; returns basenames saved."""
+    files = _as_upload_file_list(uploaded)
+    if not files:
+        return []
+    GAZE_DIR.mkdir(parents=True, exist_ok=True)
+    saved: list[str] = []
+    for uf in files:
+        base = _sanitize_upload_basename(uf.name)
+        if not base.lower().endswith(".csv"):
+            continue
+        out_name = _unique_basename_in_dir(GAZE_DIR, base)
+        dest = (GAZE_DIR / out_name).resolve()
+        assert_path_under(dest, GAZE_DIR.resolve())
+        data = uf.getvalue() if hasattr(uf, "getvalue") else uf.read()
+        dest.write_bytes(data)
+        saved.append(out_name)
+    return saved
+
+
+def _subprocess_no_window_kw() -> dict:
+    if sys.platform == "win32":
+        return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)}
+    return {}
+
+
+@functools.lru_cache(maxsize=16)
+def _resolve_ffmpeg_cached(path_sig: str) -> str | None:
+    """Find ffmpeg executable (PATH, conda env, or FFMPEG_BINARY / IMAGEIO_FFMPEG_EXE)."""
+    seen: set[str] = set()
+    candidates: list[str] = []
+
+    for key in ("FFMPEG_BINARY", "IMAGEIO_FFMPEG_EXE"):
+        v = os.environ.get(key)
+        if v and v not in seen:
+            candidates.append(os.path.expandvars(v))
+            seen.add(candidates[-1])
+
+    for name in ("ffmpeg", "ffmpeg.exe"):
+        w = shutil.which(name)
+        if w and w not in seen:
+            candidates.append(w)
+            seen.add(w)
+
+    for prefix in filter(None, (os.environ.get("CONDA_PREFIX"), str(sys.prefix))):
+        root = Path(prefix)
+        for sub in (
+            "Library/bin/ffmpeg.exe",
+            "Library/bin/ffmpeg",
+            "Scripts/ffmpeg.exe",
+            "bin/ffmpeg.exe",
+            "bin/ffmpeg",
+        ):
+            p = (root / sub).resolve()
+            if p.is_file():
+                sp = str(p)
+                if sp not in seen:
+                    candidates.append(sp)
+                    seen.add(sp)
+
+    kw = _subprocess_no_window_kw()
+    for exe in candidates:
+        try:
+            subprocess.run(
+                [exe, "-version"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=True,
+                timeout=8,
+                **kw,
+            )
+            return exe
+        except Exception:
+            continue
+    return None
+
+
+def _resolve_ffmpeg() -> str | None:
+    sig = "|".join(
+        (
+            os.environ.get("FFMPEG_BINARY", ""),
+            os.environ.get("IMAGEIO_FFMPEG_EXE", ""),
+            os.environ.get("CONDA_PREFIX", ""),
+            str(sys.prefix),
+            shutil.which("ffmpeg") or "",
+            shutil.which("ffmpeg.exe") or "",
+        )
+    )
+    return _resolve_ffmpeg_cached(sig)
+
+
 def run_ffmpeg(cmd: list[str]) -> None:
     """Run ffmpeg; on failure include stderr in the exception (not swallowed)."""
+    exe = _resolve_ffmpeg()
+    if not exe:
+        raise RuntimeError(
+            "ffmpeg not found. Install ffmpeg, add it to PATH, or set FFMPEG_BINARY to the full path "
+            "to ffmpeg.exe (conda-forge: <env>\\Library\\bin\\ffmpeg.exe)."
+        )
+    if not cmd:
+        raise ValueError("ffmpeg command is empty")
+    cmd = [exe, *cmd[1:]]
     r = subprocess.run(
         cmd,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
         text=True,
         check=False,
+        **_subprocess_no_window_kw(),
     )
     if r.returncode != 0:
         err = (r.stderr or "").strip()
@@ -144,11 +301,7 @@ def window_label_human(start: float, end: float) -> str:
 
 
 def ffmpeg_available() -> bool:
-    try:
-        subprocess.run(["ffmpeg", "-version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-        return True
-    except Exception:
-        return False
+    return _resolve_ffmpeg() is not None
 
 
 # -----------------------------
@@ -328,21 +481,15 @@ def get_reference_frame(video_path: Path, t_s: float = 1.0):
 # -----------------------------
 # Export helpers
 # -----------------------------
-def can_export_png() -> bool:
-    try:
-        import kaleido  # noqa: F401
-
-        return True
-    except Exception:
-        return False
-
-
 def export_plot(fig, out_base: Path):
     html_path = out_base.with_suffix(".html")
     fig.write_html(str(html_path), include_plotlyjs="cdn")
-    if can_export_png():
-        png_path = out_base.with_suffix(".png")
+    png_path = out_base.with_suffix(".png")
+    try:
         pio.write_image(fig, str(png_path), width=1200, height=800, scale=2)
+    except Exception:
+        # HTML already written. Kaleido can fail on Windows (Plotly 6 + Kaleido 1) or version skew.
+        pass
 
 
 def export_window_assets(session: str, start: float, end: float, figs: dict, preview_clip: Path | None) -> Path:
@@ -423,9 +570,39 @@ sessions = list_sessions()
 has_sessions = len(sessions) > 0
 
 with st.sidebar:
+    with st.expander("Upload data", expanded=False):
+        st.caption("Save files into `videos/` and/or `gaze_samples/`, then run the pipeline below.")
+        up_videos = st.file_uploader(
+            "Videos",
+            type=["mp4", "mkv", "mov", "avi"],
+            accept_multiple_files=True,
+            key="upload_videos",
+        )
+        up_csvs = st.file_uploader(
+            "Gaze CSVs",
+            type=["csv"],
+            accept_multiple_files=True,
+            key="upload_gaze_csvs",
+        )
+        if st.button("Save uploads to project folders", use_container_width=True, key="save_uploads_btn"):
+            msgs: list[str] = []
+            try:
+                v_saved = save_uploads_to_videos(up_videos)
+                if v_saved:
+                    msgs.append("videos/: " + ", ".join(v_saved))
+                c_saved = save_uploads_to_gaze_samples(up_csvs)
+                if c_saved:
+                    msgs.append("gaze_samples/: " + ", ".join(c_saved))
+                if msgs:
+                    st.success("Saved:\n" + "\n".join(msgs))
+                else:
+                    st.warning("No files selected, or no files matched the allowed types.")
+            except Exception as e:
+                st.error(f"Upload failed: {e}")
+
     with st.expander("Data pipeline (run here — no terminal)", expanded=not has_sessions):
         st.caption(
-            "Place videos in `videos/` **or** gaze CSVs in `gaze_samples/`, then run. "
+            "Place videos in `videos/` **or** gaze CSVs in `gaze_samples/` (or use **Upload data**), then run. "
             "Requires OpenCV for video extraction; FFmpeg for clips in Explore."
         )
         if st.button("Run full pipeline", type="primary", use_container_width=True):
@@ -478,6 +655,12 @@ with st.sidebar:
 
         st.divider()
         st.header("Exports")
+        st.caption(
+            "Exports write interactive HTML for every chart. PNG is added when static image export succeeds "
+            "(Kaleido). On Windows, Plotly 6 + Kaleido 1.x may fail; use `plotly>=5.18,<6` and `kaleido>=0.2.1,<1`, "
+            "or rely on HTML. FFmpeg: if clips/full video fail, set **FFMPEG_BINARY** to your `ffmpeg.exe` path "
+            "when the app is not started from an activated conda shell."
+        )
         export_window_btn = st.button("Export charts + clip (selected window)", use_container_width=True)
         export_all_full_btn = st.button("Export FULL outputs for ALL sessions", use_container_width=True)
     else:
@@ -490,7 +673,7 @@ with st.sidebar:
 if not has_sessions:
     st.info(
         "No fixation data yet. Add video files under `videos/` (or gaze CSVs under `gaze_samples/`), "
-        "then open **Data pipeline** in the sidebar and click **Run full pipeline**."
+        "or use **Upload data** in the sidebar, then open **Data pipeline** and click **Run full pipeline**."
     )
     st.stop()
 
@@ -708,7 +891,10 @@ if src_video is None:
     st.info(f"No matching video found for session '{session}'. Put the recording in `videos/` as `{session}.mp4` (or .mkv/.mov/.avi).")
 else:
     if not ffmpeg_available():
-        st.error("FFmpeg not found, so clips cannot be generated.")
+        st.error(
+            "FFmpeg not found for this process (PATH / conda). Install ffmpeg, restart from an activated env, "
+            "or set environment variable **FFMPEG_BINARY** to the full path of ffmpeg.exe."
+        )
     elif preview_clip and preview_clip.exists():
         assert_path_under(preview_clip, CLIP_DIR)
         st.video(str(preview_clip))

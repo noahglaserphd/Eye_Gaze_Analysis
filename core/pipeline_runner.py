@@ -10,7 +10,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Optional
 
@@ -92,10 +92,15 @@ def run_extract_from_videos(log: LogFn = None) -> list[str]:
     if not videos:
         raise ValueError(f"No supported videos in {VIDEO_DIR}. Extensions: {sorted(VIDEO_EXTS)}")
 
-    keep_stems = {vp.stem for vp in videos}
-    _cleanup_orphans(GAZE_DIR, "*.csv", keep_stems, "", log, lines)
-    _cleanup_orphans(FIX_DIR, "*_fixations.csv", keep_stems, "_fixations", log, lines)
-    _cleanup_orphans(SAC_DIR, "*_saccades.csv", keep_stems, "_saccades", log, lines)
+    # Keep gaze + events for every current video stem, and for any gaze CSV that does not
+    # share a stem with a current video (CSV-only sessions). Otherwise standalone uploads
+    # are deleted when this step runs alongside videos/.
+    video_stems = {vp.stem for vp in videos}
+    extra_gaze_stems = {p.stem for p in GAZE_DIR.glob("*.csv") if p.stem not in video_stems}
+    keep_session_stems = video_stems | extra_gaze_stems
+    _cleanup_orphans(GAZE_DIR, "*.csv", keep_session_stems, "", log, lines)
+    _cleanup_orphans(FIX_DIR, "*_fixations.csv", keep_session_stems, "_fixations", log, lines)
+    _cleanup_orphans(SAC_DIR, "*_saccades.csv", keep_session_stems, "_saccades", log, lines)
 
     summary_rows = []
     for vp in videos:
@@ -126,6 +131,36 @@ def run_extract_from_videos(log: LogFn = None) -> list[str]:
     return lines
 
 
+def run_analyze_gaze_paths(gaze_paths: Iterable[Path], log: LogFn = None) -> list[str]:
+    """Run I-DT on the given gaze CSV paths (no orphan cleanup)."""
+    lines: list[str] = []
+    ensure_project_dirs()
+    fix_dir = FIX_DIR
+    sac_dir = SAC_DIR
+    fix_dir.mkdir(parents=True, exist_ok=True)
+    sac_dir.mkdir(parents=True, exist_ok=True)
+
+    for gaze_path in sorted(gaze_paths, key=lambda p: p.as_posix().lower()):
+        gaze_path = gaze_path.resolve()
+        if not gaze_path.is_file() or gaze_path.suffix.lower() != ".csv":
+            continue
+        stem = gaze_path.stem
+        fix_path = fix_dir / f"{stem}_fixations.csv"
+        sac_path = sac_dir / f"{stem}_saccades.csv"
+        df = pd.read_csv(gaze_path)
+        fix = detect_fixations_idt(
+            df,
+            dispersion_thresh=DISPERSION_THRESH_NORM,
+            min_duration_s=MIN_FIX_DURATION_S,
+        )
+        sac = saccades_from_fixations(fix)
+        fix.to_csv(fix_path, index=False)
+        sac.to_csv(sac_path, index=False)
+        _emit(f"{stem}: gaze rows={len(df)} fixations={len(fix)} saccades={len(sac)}", log, lines)
+
+    return lines
+
+
 def run_analyze_gaze_csvs(log: LogFn = None) -> list[str]:
     """gaze_samples/*.csv → fixations/ + saccades/ (re-run I-DT without decoding video)."""
     lines: list[str] = []
@@ -146,21 +181,7 @@ def run_analyze_gaze_csvs(log: LogFn = None) -> list[str]:
     _cleanup_orphans(FIX_DIR, "*_fixations.csv", keep_stems, "_fixations", log, lines)
     _cleanup_orphans(SAC_DIR, "*_saccades.csv", keep_stems, "_saccades", log, lines)
 
-    for gaze_path in gaze_files:
-        stem = gaze_path.stem
-        fix_path = fix_dir / f"{stem}_fixations.csv"
-        sac_path = sac_dir / f"{stem}_saccades.csv"
-        df = pd.read_csv(gaze_path)
-        fix = detect_fixations_idt(
-            df,
-            dispersion_thresh=DISPERSION_THRESH_NORM,
-            min_duration_s=MIN_FIX_DURATION_S,
-        )
-        sac = saccades_from_fixations(fix)
-        fix.to_csv(fix_path, index=False)
-        sac.to_csv(sac_path, index=False)
-        _emit(f"{stem}: gaze rows={len(df)} fixations={len(fix)} saccades={len(sac)}", log, lines)
-
+    lines.extend(run_analyze_gaze_paths(gaze_files, log=log))
     return lines
 
 
@@ -252,14 +273,16 @@ def run_aggregate_figure(log: LogFn = None) -> list[str]:
 
 def run_full_pipeline(log: LogFn = None) -> list[str]:
     """
-    Prefer video extraction if files exist in videos/; otherwise use gaze_samples/*.csv.
-    Then: metrics summary → time windows → session figures → aggregate figure.
+    If videos/ has files: decode them first, then run I-DT on any gaze_samples/*.csv whose
+    stem does not match a video file (CSV-only sessions). If there are no videos, process
+    all gaze CSVs. Then: metrics summary → time windows → session figures → aggregate figure.
     """
     lines: list[str] = []
     ensure_project_dirs()
 
     video_files = sorted([p for p in VIDEO_DIR.iterdir() if p.is_file() and p.suffix.lower() in VIDEO_EXTS]) if VIDEO_DIR.exists() else []
     gaze_files = sorted(GAZE_DIR.glob("*.csv")) if GAZE_DIR.exists() else []
+    video_stems = {p.stem for p in video_files}
 
     if video_files:
         lines.extend(run_extract_from_videos(log=log))
@@ -270,6 +293,16 @@ def run_full_pipeline(log: LogFn = None) -> list[str]:
         raise ValueError(
             f"Add video files to {VIDEO_DIR} or gaze CSVs to {GAZE_DIR}, then run the pipeline again."
         )
+
+    if video_files and GAZE_DIR.exists():
+        csv_only = [p for p in sorted(GAZE_DIR.glob("*.csv")) if p.stem not in video_stems]
+        if csv_only:
+            _emit(
+                f"Also processing {len(csv_only)} gaze CSV(s) with no matching video stem.",
+                log,
+                lines,
+            )
+            lines.extend(run_analyze_gaze_paths(csv_only, log=log))
 
     lines.extend(run_summarize_fixations(log=log))
     lines.extend(run_time_windows(log=log))

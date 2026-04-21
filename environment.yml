@@ -12,6 +12,7 @@ dependencies:
       - opencv-python>=4.8,<5
       - streamlit>=1.28,<2
       - plotly>=5.18,<6
+      - kaleido>=0.2.1,<1
       - pillow>=10,<12
       - streamlit-drawable-canvas-fix>=0.9.3
       - pytest>=8,<9

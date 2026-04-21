@@ -15,7 +15,7 @@ from core.gaze_detection import detect_fixations_idt, saccades_from_fixations
 # -----------------------------
 # Folder layout (relative to this script)
 # -----------------------------
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 VIDEO_DIR = ROOT / "videos"
 GAZE_DIR = ROOT / "gaze_samples"
 FIX_DIR = ROOT / "fixations"

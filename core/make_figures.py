@@ -28,7 +28,7 @@ from core.viz_utils import (
     safe_median,
 )
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 GAZE_DIR = ROOT / "gaze_samples"
 FIX_DIR = ROOT / "fixations"
 SAC_DIR = ROOT / "saccades"

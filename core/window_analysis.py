@@ -7,7 +7,7 @@ from collections.abc import Callable
 from core.pipeline_config import WINDOW_SIZE
 from core.window_utils import compute_window_metrics, compute_windows_from_fix
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 fix_dir = ROOT / "fixations"
 sac_dir = ROOT / "saccades"
 out_dir = ROOT / "time_windows"
