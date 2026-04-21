@@ -18,15 +18,12 @@ def gaussian_kernel(radius: int, sigma: float) -> np.ndarray:
 
 
 def convolve2d_same(img: np.ndarray, kernel: np.ndarray) -> np.ndarray:
+    # Fast path without extra dependencies: vectorized sliding-window contraction.
     kh, kw = kernel.shape
     pad_h, pad_w = kh // 2, kw // 2
     padded = np.pad(img, ((pad_h, pad_h), (pad_w, pad_w)), mode="edge")
-    out = np.zeros_like(img, dtype=float)
-    for i in range(out.shape[0]):
-        for j in range(out.shape[1]):
-            window = padded[i : i + kh, j : j + kw]
-            out[i, j] = np.sum(window * kernel)
-    return out
+    windows = np.lib.stride_tricks.sliding_window_view(padded, (kh, kw))
+    return np.einsum("ijkl,kl->ij", windows, kernel, optimize=True)
 
 
 def duration_weighted_fixation_heatmap(

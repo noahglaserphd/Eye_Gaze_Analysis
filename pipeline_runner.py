@@ -44,6 +44,24 @@ def _emit(msg: str, log: LogFn, lines: list[str]) -> None:
         log(msg)
 
 
+def _session_stems_from_glob(folder: Path, pattern: str, suffix: str) -> set[str]:
+    stems: set[str] = set()
+    for p in folder.glob(pattern):
+        if p.is_file():
+            stems.add(p.stem.removesuffix(suffix))
+    return stems
+
+
+def _cleanup_orphans(directory: Path, pattern: str, keep_stems: set[str], stem_suffix: str, log: LogFn, lines: list[str]) -> None:
+    for p in sorted(directory.glob(pattern)):
+        if not p.is_file():
+            continue
+        stem = p.stem.removesuffix(stem_suffix)
+        if stem not in keep_stems:
+            p.unlink(missing_ok=True)
+            _emit(f"Removed stale file: {p.relative_to(ROOT)}", log, lines)
+
+
 def ensure_project_dirs() -> None:
     """Create all project folders used by the pipeline and dashboard."""
     ensure_extract_dirs()
@@ -73,6 +91,11 @@ def run_extract_from_videos(log: LogFn = None) -> list[str]:
     videos = sorted([p for p in VIDEO_DIR.iterdir() if p.is_file() and p.suffix.lower() in VIDEO_EXTS])
     if not videos:
         raise ValueError(f"No supported videos in {VIDEO_DIR}. Extensions: {sorted(VIDEO_EXTS)}")
+
+    keep_stems = {vp.stem for vp in videos}
+    _cleanup_orphans(GAZE_DIR, "*.csv", keep_stems, "", log, lines)
+    _cleanup_orphans(FIX_DIR, "*_fixations.csv", keep_stems, "_fixations", log, lines)
+    _cleanup_orphans(SAC_DIR, "*_saccades.csv", keep_stems, "_saccades", log, lines)
 
     summary_rows = []
     for vp in videos:
@@ -118,6 +141,10 @@ def run_analyze_gaze_csvs(log: LogFn = None) -> list[str]:
     gaze_files = sorted(GAZE_DIR.glob("*.csv"))
     if not gaze_files:
         raise ValueError(f"No gaze sample CSVs in {GAZE_DIR}")
+
+    keep_stems = {p.stem for p in gaze_files}
+    _cleanup_orphans(FIX_DIR, "*_fixations.csv", keep_stems, "_fixations", log, lines)
+    _cleanup_orphans(SAC_DIR, "*_saccades.csv", keep_stems, "_saccades", log, lines)
 
     for gaze_path in gaze_files:
         stem = gaze_path.stem
@@ -185,64 +212,41 @@ def run_summarize_fixations(log: LogFn = None) -> list[str]:
 
 def run_time_windows(log: LogFn = None) -> list[str]:
     """fixations/ + saccades/ → time_windows/* + timeline PNGs."""
-    import io
-    import sys
-
     import window_analysis
 
     lines: list[str] = []
-    buf = io.StringIO()
-    old = sys.stdout
-    try:
-        sys.stdout = buf
-        window_analysis.main()
-    finally:
-        sys.stdout = old
-    for line in buf.getvalue().splitlines():
-        if line.strip():
-            _emit(line.strip(), log, lines)
+    if not FIX_DIR.exists():
+        raise ValueError(f"Missing folder: {FIX_DIR}")
+    keep_stems = _session_stems_from_glob(FIX_DIR, "*_fixations.csv", "_fixations")
+    tw_dir = ROOT / "time_windows"
+    if tw_dir.exists():
+        _cleanup_orphans(tw_dir, "*_windows.csv", keep_stems, "_windows", log, lines)
+        _cleanup_orphans(tw_dir, "*_timeline.png", keep_stems, "_timeline", log, lines)
+
+    window_analysis.main(log=lambda m: _emit(m, log, lines))
     return lines
 
 
 def run_session_figures(log: LogFn = None) -> list[str]:
     """Per-session PNG summaries in figures/."""
-    import io
-    import sys
-
     import make_figures
 
     lines: list[str] = []
-    buf = io.StringIO()
-    old = sys.stdout
-    try:
-        sys.stdout = buf
-        make_figures.main()
-    finally:
-        sys.stdout = old
-    for line in buf.getvalue().splitlines():
-        if line.strip():
-            _emit(line.strip(), log, lines)
+    keep_stems = _session_stems_from_glob(GAZE_DIR, "*.csv", "")
+    fig_dir = ROOT / "figures"
+    if fig_dir.exists():
+        _cleanup_orphans(fig_dir, "*_summary.png", keep_stems, "_summary", log, lines)
+
+    make_figures.main(log=lambda m: _emit(m, log, lines))
     return lines
 
 
 def run_aggregate_figure(log: LogFn = None) -> list[str]:
     """figures/ALL_sessions_summary.png"""
-    import io
-    import sys
-
     import make_aggregate_figure
 
     lines: list[str] = []
-    buf = io.StringIO()
-    old = sys.stdout
-    try:
-        sys.stdout = buf
-        make_aggregate_figure.main()
-    finally:
-        sys.stdout = old
-    for line in buf.getvalue().splitlines():
-        if line.strip():
-            _emit(line.strip(), log, lines)
+    make_aggregate_figure.main(log=lambda m: _emit(m, log, lines))
     return lines
 
 

@@ -21,11 +21,12 @@ import subprocess
 
 import numpy as np
 import pandas as pd
-import plotly.express as px
 import plotly.graph_objects as go
 import plotly.io as pio
 import streamlit as st
 
+from dashboard_aoi import add_aoi_shapes_to_scanpath, aoi_summary_table, assign_aoi_rects, normalize_aois, sanitize_aoi_label
+from dashboard_charts import make_heatmap, make_hist_fix_dur, make_hist_sac_amp, make_scanpath
 from pipeline_config import HEATMAP_BINS_STREAMLIT as HEATMAP_BINS, WINDOW_SIZE
 from pipeline_runner import (
     ensure_project_dirs,
@@ -37,6 +38,7 @@ from pipeline_runner import (
     run_summarize_fixations,
     run_time_windows,
 )
+from window_utils import compute_window_metrics, compute_windows_from_fix, subset_window
 
 try:
     import cv2  # type: ignore
@@ -107,12 +109,6 @@ def assert_path_under(path: Path, root: Path) -> Path:
     return path
 
 
-def sanitize_aoi_label(name: str, max_len: int = 80) -> str:
-    """Avoid HTML/script injection in Plotly annotations and readable labels."""
-    t = str(name)[:max_len]
-    return "".join(ch for ch in t if ch.isprintable()).replace("<", "").replace(">", "")
-
-
 def run_ffmpeg(cmd: list[str]) -> None:
     """Run ffmpeg; on failure include stderr in the exception (not swallowed)."""
     r = subprocess.run(
@@ -161,8 +157,15 @@ def ffmpeg_available() -> bool:
 @st.cache_data
 def list_sessions() -> list[str]:
     fix_files = sorted(FIX_DIR.glob("*_fixations.csv"))
-    out = [p.stem.replace("_fixations", "") for p in fix_files]
-    return [s for s in out if is_safe_session_id(s)]
+    out: list[str] = []
+    for p in fix_files:
+        s = p.stem.replace("_fixations", "")
+        if not is_safe_session_id(s):
+            continue
+        sac_p = SAC_DIR / f"{s}_saccades.csv"
+        if sac_p.exists():
+            out.append(s)
+    return out
 
 
 def _session_data_paths(session: str) -> tuple[Path, Path]:
@@ -198,42 +201,12 @@ def load_windows_if_exists(session: str) -> pd.DataFrame | None:
     return pd.read_csv(f)
 
 
-def compute_windows_from_fix(fix: pd.DataFrame) -> pd.DataFrame:
-    if len(fix) == 0:
-        return pd.DataFrame(columns=["window_start", "window_end"])
-    max_time = float(fix["end_s"].max())
-    starts = np.arange(0, max_time + WINDOW_SIZE, WINDOW_SIZE)
-    return pd.DataFrame({"window_start": starts[:-1].astype(float), "window_end": (starts[:-1] + WINDOW_SIZE).astype(float)})
-
-
-def compute_window_metrics(fix: pd.DataFrame, sac: pd.DataFrame, win_df: pd.DataFrame) -> pd.DataFrame:
-    needed = {"fixation_count", "mean_fix_duration", "total_fix_time", "mean_saccade_amp"}
-    if needed.issubset(set(win_df.columns)):
-        return win_df
-
-    rows = []
-    for r in win_df.itertuples(index=False):
-        start = float(getattr(r, "window_start"))
-        end = float(getattr(r, "window_end"))
-        f = fix[(fix["start_s"] >= start) & (fix["start_s"] < end)]
-        s = sac[(sac["start_s"] >= start) & (sac["start_s"] < end)]
-        rows.append(
-            dict(
-                window_start=start,
-                window_end=end,
-                fixation_count=int(len(f)),
-                mean_fix_duration=float(f["duration_s"].mean()) if len(f) else 0.0,
-                total_fix_time=float(f["duration_s"].sum()) if len(f) else 0.0,
-                mean_saccade_amp=float(s["amplitude_norm"].mean()) if (len(s) and "amplitude_norm" in s.columns) else 0.0,
-            )
-        )
-    return pd.DataFrame(rows)
-
-
-def subset_window(fix: pd.DataFrame, sac: pd.DataFrame, start: float, end: float):
-    f = fix[(fix["start_s"] >= start) & (fix["start_s"] < end)].copy()
-    s = sac[(sac["start_s"] >= start) & (sac["start_s"] < end)].copy()
-    return f, s
+def refresh_data_caches() -> None:
+    """Clear only data readers used by Explore, not every cache in the app."""
+    list_sessions.clear()
+    load_fix.clear()
+    load_sac.clear()
+    load_windows_if_exists.clear()
 
 
 # -----------------------------
@@ -313,111 +286,12 @@ def load_aois() -> list[dict]:
     except Exception:
         return []
     aois = data.get("aois", [])
-    cleaned: list[dict] = []
-    for a in aois:
-        if not isinstance(a, dict):
-            continue
-        if not all(k in a for k in ("name", "x0", "y0", "x1", "y1")):
-            continue
-        try:
-            x0, y0 = float(a["x0"]), float(a["y0"])
-            x1, y1 = float(a["x1"]), float(a["y1"])
-            cleaned.append(
-                {
-                    "name": sanitize_aoi_label(str(a["name"])),
-                    "x0": float(np.clip(min(x0, x1), 0.0, 1.0)),
-                    "y0": float(np.clip(min(y0, y1), 0.0, 1.0)),
-                    "x1": float(np.clip(max(x0, x1), 0.0, 1.0)),
-                    "y1": float(np.clip(max(y0, y1), 0.0, 1.0)),
-                }
-            )
-        except Exception:
-            continue
-    return cleaned
-
-
-def assign_aoi_rects(fix_df: pd.DataFrame, aois: list[dict]) -> pd.DataFrame:
-    out = fix_df.copy()
-    if len(out) == 0:
-        out["aoi"] = pd.Series(dtype="object")
-        return out
-
-    out["aoi"] = "None"
-    if not aois:
-        return out
-
-    x = out["x_norm"].to_numpy(float)
-    y = out["y_norm"].to_numpy(float)
-    valid = np.isfinite(x) & np.isfinite(y)
-
-    for a in aois:
-        inside = valid & (x >= a["x0"]) & (x <= a["x1"]) & (y >= a["y0"]) & (y <= a["y1"])
-        out.loc[inside, "aoi"] = a["name"]
-
-    return out
-
-
-def aoi_summary_table(fix_df_with_aoi: pd.DataFrame) -> pd.DataFrame:
-    if len(fix_df_with_aoi) == 0 or "aoi" not in fix_df_with_aoi.columns:
-        return pd.DataFrame(columns=["aoi", "fixation_count", "dwell_time_s", "mean_fix_duration_s"])
-    g = fix_df_with_aoi.groupby("aoi", dropna=False)
-    return (
-        g.agg(
-            fixation_count=("aoi", "count"),
-            dwell_time_s=("duration_s", "sum"),
-            mean_fix_duration_s=("duration_s", "mean"),
-        )
-        .reset_index()
-        .sort_values(["dwell_time_s", "fixation_count"], ascending=False)
-        .reset_index(drop=True)
-    )
-
-
-def add_aoi_shapes_to_scanpath(fig: go.Figure, aois: list[dict]) -> go.Figure:
-    for a in aois:
-        fig.add_shape(
-            type="rect",
-            x0=a["x0"],
-            x1=a["x1"],
-            y0=a["y0"],
-            y1=a["y1"],
-            line=dict(width=2),
-            fillcolor="rgba(255,255,255,0.06)",
-            layer="below",
-        )
-        fig.add_annotation(
-            x=(a["x0"] + a["x1"]) / 2.0,
-            y=a["y0"],
-            text=sanitize_aoi_label(str(a.get("name", ""))),
-            showarrow=False,
-            yanchor="bottom",
-            font=dict(size=12),
-        )
-    return fig
+    return normalize_aois(aois if isinstance(aois, list) else [])
 
 
 def save_aois(aois: list[dict]) -> None:
     AOI_DIR.mkdir(exist_ok=True)
-    norm: list[dict] = []
-    for a in aois:
-        if not isinstance(a, dict):
-            continue
-        if not all(k in a for k in ("name", "x0", "y0", "x1", "y1")):
-            continue
-        try:
-            x0, y0 = float(a["x0"]), float(a["y0"])
-            x1, y1 = float(a["x1"]), float(a["y1"])
-            norm.append(
-                {
-                    "name": sanitize_aoi_label(str(a.get("name", "AOI"))),
-                    "x0": float(np.clip(min(x0, x1), 0.0, 1.0)),
-                    "y0": float(np.clip(min(y0, y1), 0.0, 1.0)),
-                    "x1": float(np.clip(max(x0, x1), 0.0, 1.0)),
-                    "y1": float(np.clip(max(y0, y1), 0.0, 1.0)),
-                }
-            )
-        except (TypeError, ValueError):
-            continue
+    norm = normalize_aois(aois)
     payload = {"coordinate_space": "norm", "aois": norm}
     AOI_FILE.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     load_aois.clear()
@@ -451,64 +325,6 @@ def get_reference_frame(video_path: Path, t_s: float = 1.0):
 # -----------------------------
 # Charts
 # -----------------------------
-def make_heatmap(fix_df: pd.DataFrame, bins: int = HEATMAP_BINS):
-    if len(fix_df) == 0:
-        z = np.zeros((bins, bins))
-    else:
-        x = fix_df["x_norm"].to_numpy(float)
-        y = fix_df["y_norm"].to_numpy(float)
-        w = fix_df["duration_s"].to_numpy(float)
-        valid = np.isfinite(x) & np.isfinite(y) & np.isfinite(w)
-        x, y, w = x[valid], y[valid], w[valid]
-        H2, _, _ = np.histogram2d(x, y, bins=bins, range=[[0, 1], [0, 1]], weights=w)
-        z = H2.T
-    fig = px.imshow(z, origin="upper", aspect="auto")
-    fig.update_layout(margin=dict(l=10, r=10, t=35, b=10), title="Fixation heatmap (duration-weighted)")
-    fig.update_xaxes(showticklabels=False)
-    fig.update_yaxes(showticklabels=False)
-    return fig
-
-
-def make_scanpath(fix_df: pd.DataFrame):
-    fig = go.Figure()
-    fig.update_layout(title="Scanpath", xaxis_title="x (norm)", yaxis_title="y (norm)", margin=dict(l=10, r=10, t=35, b=10))
-    fig.update_xaxes(range=[0, 1])
-    fig.update_yaxes(autorange="reversed", range=[1, 0])
-    if len(fix_df) == 0:
-        return fig
-    max_d = float(fix_df["duration_s"].max()) if float(fix_df["duration_s"].max()) > 0 else 1.0
-    sizes = 8 + 30 * (fix_df["duration_s"] / max_d)
-    fig.add_trace(go.Scatter(x=fix_df["x_norm"], y=fix_df["y_norm"], mode="lines", name="path", line=dict(width=1)))
-    fig.add_trace(
-        go.Scatter(
-            x=fix_df["x_norm"],
-            y=fix_df["y_norm"],
-            mode="markers",
-            name="fixations",
-            marker=dict(size=sizes, opacity=0.8),
-            hovertemplate="start=%{customdata[0]:.2f}s<br>dur=%{customdata[1]:.3f}s<br>x=%{x:.3f}, y=%{y:.3f}<extra></extra>",
-            customdata=np.column_stack([fix_df["start_s"], fix_df["duration_s"]]),
-        )
-    )
-    return fig
-
-
-def make_hist_fix_dur(fix_df: pd.DataFrame):
-    fig = px.histogram(fix_df, x="duration_s", nbins=30, title="Fixation duration distribution")
-    fig.update_layout(margin=dict(l=10, r=10, t=35, b=10))
-    return fig
-
-
-def make_hist_sac_amp(sac_df: pd.DataFrame):
-    if len(sac_df) == 0 or "amplitude_norm" not in sac_df.columns:
-        fig = go.Figure()
-        fig.update_layout(margin=dict(l=10, r=10, t=35, b=10), title="Saccade amplitude distribution")
-        return fig
-    fig = px.histogram(sac_df, x="amplitude_norm", nbins=30, title="Saccade amplitude distribution")
-    fig.update_layout(margin=dict(l=10, r=10, t=35, b=10))
-    return fig
-
-
 # -----------------------------
 # Export helpers
 # -----------------------------
@@ -556,7 +372,7 @@ def export_full_session_assets(session: str) -> str:
     out_dir.mkdir(parents=True, exist_ok=True)
     assert_path_under(out_dir, EXPORT_DIR)
 
-    export_plot(make_heatmap(fix), out_dir / "heatmap_full")
+    export_plot(make_heatmap(fix, HEATMAP_BINS), out_dir / "heatmap_full")
     export_plot(make_scanpath(fix), out_dir / "scanpath_full")
     export_plot(make_hist_fix_dur(fix), out_dir / "fix_dur_hist_full")
     export_plot(make_hist_sac_amp(sac), out_dir / "sac_amp_hist_full")
@@ -581,6 +397,25 @@ def export_full_session_assets(session: str) -> str:
     return f"{session}: full charts exported; AOI CSV exported (if AOIs exist); full video exported."
 
 
+def run_pipeline_step(action, spinner_text: str, success_text: str | None = None) -> None:
+    lines: list[str] = []
+
+    def lg(msg: str) -> None:
+        lines.append(msg)
+
+    try:
+        with st.spinner(spinner_text):
+            action(log=lg)
+        st.session_state.pipeline_log = "\n".join(lines)
+        refresh_data_caches()
+        if success_text:
+            st.success(success_text)
+        st.rerun()
+    except Exception as e:
+        st.session_state.pipeline_log = "\n".join(lines) + f"\nError: {e}"
+        st.error(str(e))
+
+
 # -----------------------------
 # Sessions + sidebar (pipeline + explore)
 # -----------------------------
@@ -594,116 +429,26 @@ with st.sidebar:
             "Requires OpenCV for video extraction; FFmpeg for clips in Explore."
         )
         if st.button("Run full pipeline", type="primary", use_container_width=True):
-            log_lines: list[str] = []
-
-            def _append_log(msg: str) -> None:
-                log_lines.append(msg)
-
-            try:
-                with st.spinner("Running full pipeline…"):
-                    run_full_pipeline(log=_append_log)
-                st.session_state.pipeline_log = "\n".join(log_lines)
-                st.cache_data.clear()
-                st.success("Pipeline finished.")
-                st.rerun()
-            except Exception as e:
-                st.session_state.pipeline_log = "\n".join(log_lines) + f"\nError: {e}"
-                st.error(str(e))
+            run_pipeline_step(run_full_pipeline, "Running full pipeline…", "Pipeline finished.")
 
         st.markdown("**Individual steps**")
         if st.button("Videos → events", use_container_width=True, help="Decode gaze from videos/"):
-            lines: list[str] = []
-
-            def lgv(m: str) -> None:
-                lines.append(m)
-
-            try:
-                with st.spinner("Extracting from videos…"):
-                    run_extract_from_videos(log=lgv)
-                st.session_state.pipeline_log = "\n".join(lines)
-                st.cache_data.clear()
-                st.success("Video extraction finished.")
-                st.rerun()
-            except Exception as e:
-                st.session_state.pipeline_log = "\n".join(lines) + f"\nError: {e}"
-                st.error(str(e))
+            run_pipeline_step(run_extract_from_videos, "Extracting from videos…", "Video extraction finished.")
 
         if st.button("Gaze CSVs → events", use_container_width=True, help="I-DT on gaze_samples/*.csv"):
-            lines: list[str] = []
-
-            def lg(m: str) -> None:
-                lines.append(m)
-
-            try:
-                with st.spinner("Processing gaze CSVs…"):
-                    run_analyze_gaze_csvs(log=lg)
-                st.session_state.pipeline_log = "\n".join(lines)
-                st.cache_data.clear()
-                st.success("Done.")
-                st.rerun()
-            except Exception as e:
-                st.session_state.pipeline_log = "\n".join(lines) + f"\nError: {e}"
-                st.error(str(e))
+            run_pipeline_step(run_analyze_gaze_csvs, "Processing gaze CSVs…", "Done.")
 
         if st.button("Summarize fixations", use_container_width=True):
-            lines = []
-
-            def lg2(m: str) -> None:
-                lines.append(m)
-
-            try:
-                with st.spinner("Summarizing…"):
-                    run_summarize_fixations(log=lg2)
-                st.session_state.pipeline_log = "\n".join(lines)
-                st.cache_data.clear()
-                st.rerun()
-            except Exception as e:
-                st.error(str(e))
+            run_pipeline_step(run_summarize_fixations, "Summarizing…")
 
         if st.button("Time windows", use_container_width=True):
-            lines = []
-
-            def lg3(m: str) -> None:
-                lines.append(m)
-
-            try:
-                with st.spinner("Computing windows…"):
-                    run_time_windows(log=lg3)
-                st.session_state.pipeline_log = "\n".join(lines)
-                st.cache_data.clear()
-                st.rerun()
-            except Exception as e:
-                st.error(str(e))
+            run_pipeline_step(run_time_windows, "Computing windows…")
 
         if st.button("Session PNG figures", use_container_width=True):
-            lines = []
-
-            def lg4(m: str) -> None:
-                lines.append(m)
-
-            try:
-                with st.spinner("Building figures…"):
-                    run_session_figures(log=lg4)
-                st.session_state.pipeline_log = "\n".join(lines)
-                st.cache_data.clear()
-                st.rerun()
-            except Exception as e:
-                st.error(str(e))
+            run_pipeline_step(run_session_figures, "Building figures…")
 
         if st.button("Aggregate figure", use_container_width=True):
-            lines = []
-
-            def lg5(m: str) -> None:
-                lines.append(m)
-
-            try:
-                with st.spinner("Building aggregate…"):
-                    run_aggregate_figure(log=lg5)
-                st.session_state.pipeline_log = "\n".join(lines)
-                st.cache_data.clear()
-                st.rerun()
-            except Exception as e:
-                st.error(str(e))
+            run_pipeline_step(run_aggregate_figure, "Building aggregate…")
 
         st.text_area(
             "Last pipeline log",
@@ -723,7 +468,7 @@ with st.sidebar:
 
         win_df = load_windows_if_exists(session)
         if win_df is None:
-            win_df = compute_windows_from_fix(fix)
+            win_df = compute_windows_from_fix(fix, WINDOW_SIZE)
         if len(win_df) == 0:
             st.warning("No windows available (empty fixation file).")
             st.stop()
@@ -801,7 +546,7 @@ fix_all_aoi = assign_aoi_rects(fix, aois)
 # -----------------------------
 # Charts
 # -----------------------------
-fig_heat = make_heatmap(fix_w_aoi)
+fig_heat = make_heatmap(fix_w_aoi, HEATMAP_BINS)
 fig_scan = add_aoi_shapes_to_scanpath(make_scanpath(fix_w_aoi), aois)
 fig_fixhist = make_hist_fix_dur(fix_w_aoi)
 fig_sachist = make_hist_sac_amp(sac_w)

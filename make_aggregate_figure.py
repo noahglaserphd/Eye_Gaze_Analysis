@@ -16,6 +16,7 @@
 #   pip install pandas numpy matplotlib
 
 from pathlib import Path
+from collections.abc import Callable
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -35,7 +36,8 @@ FIG_DIR = ROOT / "figures"
 FIG_DIR.mkdir(exist_ok=True)
 
 
-def main():
+def main(log: Callable[[str], None] | None = None) -> None:
+    emit = log or print
     fix_files = sorted(FIX_DIR.glob("*_fixations.csv"))
     sac_files = sorted(SAC_DIR.glob("*_saccades.csv"))
 
@@ -150,7 +152,7 @@ def main():
     out = FIG_DIR / "ALL_sessions_summary.png"
     fig.savefig(out, dpi=200)
     plt.close(fig)
-    print(f"Wrote {out.relative_to(ROOT)}")
+    emit(f"Wrote {out.relative_to(ROOT)}")
 
 
 if __name__ == "__main__":

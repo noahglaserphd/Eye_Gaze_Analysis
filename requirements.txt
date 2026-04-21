@@ -12,3 +12,6 @@ streamlit-drawable-canvas-fix>=0.9.3
 
 # Optional: PNG export of Plotly figures from the dashboard (export_plot)
 # kaleido>=0.2.1,<2
+
+# Testing
+pytest>=8,<9

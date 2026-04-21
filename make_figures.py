@@ -10,6 +10,7 @@
 #   pip install matplotlib pandas numpy
 
 from pathlib import Path
+from collections.abc import Callable
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -35,13 +36,13 @@ FIG_DIR = ROOT / "figures"
 FIG_DIR.mkdir(exist_ok=True)
 
 
-def plot_summary_for_stem(stem: str) -> None:
+def plot_summary_for_stem(stem: str, emit: Callable[[str], None]) -> None:
     gaze_file = GAZE_DIR / f"{stem}.csv"
     fix_file = FIX_DIR / f"{stem}_fixations.csv"
     sac_file = SAC_DIR / f"{stem}_saccades.csv"
 
     if not (gaze_file.exists() and fix_file.exists() and sac_file.exists()):
-        print(f"Skipping {stem}: missing one of gaze/fix/sac CSVs")
+        emit(f"Skipping {stem}: missing one of gaze/fix/sac CSVs")
         return
 
     fix = pd.read_csv(fix_file)
@@ -114,10 +115,11 @@ def plot_summary_for_stem(stem: str) -> None:
     out = FIG_DIR / f"{stem}_summary.png"
     fig.savefig(out, dpi=200)
     plt.close(fig)
-    print(f"Wrote {out.relative_to(ROOT)}")
+    emit(f"Wrote {out.relative_to(ROOT)}")
 
 
-def main() -> None:
+def main(log: Callable[[str], None] | None = None) -> None:
+    emit = log or print
     if not GAZE_DIR.exists():
         raise SystemExit(f"Missing folder: {GAZE_DIR}")
 
@@ -126,7 +128,7 @@ def main() -> None:
         raise SystemExit(f"No gaze sample CSVs found in {GAZE_DIR}")
 
     for stem in stems:
-        plot_summary_for_stem(stem)
+        plot_summary_for_stem(stem, emit)
 
 
 if __name__ == "__main__":

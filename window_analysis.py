@@ -2,8 +2,10 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from pathlib import Path
+from collections.abc import Callable
 
 from pipeline_config import WINDOW_SIZE
+from window_utils import compute_window_metrics, compute_windows_from_fix
 
 ROOT = Path(__file__).resolve().parent
 fix_dir = ROOT / "fixations"
@@ -11,7 +13,8 @@ sac_dir = ROOT / "saccades"
 out_dir = ROOT / "time_windows"
 
 
-def main() -> None:
+def main(log: Callable[[str], None] | None = None) -> None:
+    emit = log or print
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if not fix_dir.exists():
@@ -29,65 +32,31 @@ def main() -> None:
         fix = pd.read_csv(fix_file)
 
         if len(fix) == 0:
-            print(f"Skipping {session}: empty fixations")
+            emit(f"Skipping {session}: empty fixations")
             continue
 
         if "end_s" not in fix.columns or "start_s" not in fix.columns:
-            print(f"Skipping {session}: missing start_s/end_s columns")
+            emit(f"Skipping {session}: missing start_s/end_s columns")
             continue
 
         max_time = float(fix["end_s"].max())
         if not np.isfinite(max_time) or max_time <= 0:
-            print(f"Skipping {session}: invalid end_s (max={max_time})")
+            emit(f"Skipping {session}: invalid end_s (max={max_time})")
             continue
 
         if sac_file.exists():
             sac = pd.read_csv(sac_file)
         else:
-            print(f"Warning: missing {sac_file.name} — using empty saccades")
+            emit(f"Warning: missing {sac_file.name} — using empty saccades")
             sac = pd.DataFrame(columns=["start_s", "amplitude_norm"])
 
-        windows = np.arange(0, max_time + WINDOW_SIZE, WINDOW_SIZE)
-        if len(windows) < 2:
-            print(f"Skipping {session}: no full {WINDOW_SIZE}s window (max_time={max_time:.3f}s)")
+        win_df = compute_windows_from_fix(fix, WINDOW_SIZE)
+        if len(win_df) == 0:
+            emit(f"Skipping {session}: no full {WINDOW_SIZE}s window (max_time={max_time:.3f}s)")
             continue
 
-        rows = []
-
-        for start in windows[:-1]:
-
-            end = start + WINDOW_SIZE
-
-            f = fix[(fix["start_s"] >= start) & (fix["start_s"] < end)]
-            s = sac[(sac["start_s"] >= start) & (sac["start_s"] < end)]
-
-            mean_amp = 0.0
-            if len(s) and "amplitude_norm" in s.columns:
-                mean_amp = float(s["amplitude_norm"].mean())
-
-            if len(f) and "duration_s" in f.columns:
-                mean_dur = float(f["duration_s"].mean())
-                total_dur = float(f["duration_s"].sum())
-            elif len(f):
-                mean_dur = 0.0
-                total_dur = 0.0
-            else:
-                mean_dur = 0.0
-                total_dur = 0.0
-
-            row = {
-                "session": session,
-                "window_start": start,
-                "window_end": end,
-                "fixation_count": len(f),
-                "mean_fix_duration": mean_dur,
-                "total_fix_time": total_dur,
-                "mean_saccade_amp": mean_amp,
-            }
-
-            rows.append(row)
-
-        df = pd.DataFrame(rows)
+        df = compute_window_metrics(fix, sac, win_df)
+        df.insert(0, "session", session)
 
         csv_out = out_dir / f"{session}_windows.csv"
         df.to_csv(csv_out, index=False)
@@ -117,7 +86,7 @@ def main() -> None:
         plt.savefig(fig_out)
         plt.close()
 
-        print(f"Processed {session}")
+        emit(f"Processed {session}")
 
 
 if __name__ == "__main__":

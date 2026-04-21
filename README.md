@@ -51,6 +51,13 @@ The same logic lives in `pipeline_runner.py` and is exposed by the existing scri
     
     app.py                       interactive dashboard (pipeline + exploration)
     pipeline_runner.py           shared pipeline implementation (dashboard + CLI)
+    pipeline_config.py           shared defaults (window size, heatmap bins)
+    gaze_detection.py            shared fixation/saccade detection logic
+    viz_utils.py                 shared offline heatmap helpers
+    window_utils.py              shared window slicing + metrics logic
+    dashboard_aoi.py             shared AOI normalization/assignment helpers
+    dashboard_charts.py          shared Plotly chart builders used by app.py
+    tests/                       pytest suite for core processing helpers
 
 ---
 
@@ -78,6 +85,24 @@ Optional: export Plotly charts as PNG from the dashboard:
 Shared defaults for window length and heatmap resolution live in `pipeline_config.py`. The repository includes a `.gitignore` that excludes typical generated folders (`gaze_samples/`, `fixations/`, `videos/`, etc.); adjust it if you need to version data in git.
 
 Other shared modules: `gaze_detection.py` (I-DT fixations and saccades), `viz_utils.py` (offline heatmaps for PNG figures).
+
+---
+
+# Running Tests
+
+Install dependencies (includes pytest):
+
+    pip install -r requirements.txt
+
+Run the test suite from the repository root:
+
+    python -m pytest -q
+
+Current test coverage focuses on core, deterministic logic:
+
+- fixation and saccade derivation (`gaze_detection.py`)
+- time-window generation and metrics (`window_utils.py`)
+- AOI normalization and assignment (`dashboard_aoi.py`)
 
 ---
 
