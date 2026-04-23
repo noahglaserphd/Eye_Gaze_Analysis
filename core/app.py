@@ -690,12 +690,29 @@ timeline_fig.add_trace(go.Scatter(x=t, y=win_df["mean_saccade_amp"], mode="lines
 
 timeline_fig.update_layout(
     height=320,
-    margin=dict(l=10, r=10, t=10, b=10),
+    # Reserve space for two right-side axes so titles/ticks do not overlap.
+    margin=dict(l=10, r=130, t=10, b=10),
     legend=dict(orientation="h"),
     xaxis=dict(title="time (s)"),
-    yaxis=dict(title="fixations / window"),
-    yaxis2=dict(title="mean fix dur (s)", overlaying="y", side="right", anchor="x"),
-    yaxis3=dict(title="mean sacc amp", overlaying="y", side="right", anchor="free", position=1.0),
+    yaxis=dict(title="fixations / window", automargin=True),
+    yaxis2=dict(
+        title="mean fix dur (s)",
+        overlaying="y",
+        side="right",
+        anchor="free",
+        position=0.90,
+        automargin=True,
+        title_standoff=8,
+    ),
+    yaxis3=dict(
+        title="mean sacc amp",
+        overlaying="y",
+        side="right",
+        anchor="free",
+        position=0.99,
+        automargin=True,
+        title_standoff=8,
+    ),
     template="plotly_dark",
     paper_bgcolor="rgba(0,0,0,0)",
     plot_bgcolor="rgba(0,0,0,0)",

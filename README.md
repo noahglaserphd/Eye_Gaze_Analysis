@@ -299,41 +299,6 @@ The dashboard is designed primarily for **exploratory analysis and qualitative i
 
 ---
 
-# Optional Usability Measure — NASA-TLX
-
-If you collect participant NASA-TLX responses, the repository now includes a scoring script:
-
-    python core/usability_measure.py --template metrics/nasa_tlx_responses.csv
-
-Fill in that CSV template (one row per participant/session) using the six required 0-100 subscales:
-
-- `mental_demand`
-- `physical_demand`
-- `temporal_demand`
-- `performance`
-- `effort`
-- `frustration`
-
-Then score responses:
-
-    python core/usability_measure.py --input metrics/nasa_tlx_responses.csv --output metrics/nasa_tlx_scores.csv
-
-This computes:
-
-- `nasa_tlx_raw` (mean of six subscales)
-- `nasa_tlx_weighted` (if optional pairwise-comparison weights are provided)
-- `workload_interpretation` (heuristic label for quick reporting)
-
-For strict weighted scoring (enforce all six weight columns and row-wise weight sum = 15):
-
-    python core/usability_measure.py --strict-weighting
-
-Output:
-
-    metrics/nasa_tlx_scores.csv
-
----
-
 # AOI (Area of Interest) Analysis
 
 The system supports **AOI-based gaze analysis**.
